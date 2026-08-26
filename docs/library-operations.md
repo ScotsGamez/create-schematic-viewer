@@ -5,9 +5,13 @@ default and `/data` in the container image). Keep this directory on persistent
 storage. It contains immutable content-addressed objects plus small JSON
 manifests; it is application data and must not be committed to Git.
 
-The server is read-only by default. Set `LIBRARY_WRITE_ENABLED=true` only for
-a trusted curator session or behind an authenticated reverse-proxy route. The
-flag does not identify users and must not be treated as authentication.
+The server is read-only by default. Set `LIBRARY_WRITE_MODE=local` only for a
+trusted standalone curator session; every user that can reach that instance
+can then change the library. Embedded deployments must use explicit
+`LIBRARY_WRITE_MODE=trusted-proxy` with `LIBRARY_ADMIN_TOKEN_FILE`; the server
+refuses ambiguous combinations rather than silently ignoring a token file. See
+the [LANtern embed contract](lantern-embed-contract.md) for the authenticated
+proxy boundary.
 
 ## Import boundary
 

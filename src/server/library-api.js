@@ -21,7 +21,7 @@ export class LibraryHttpError extends Error {
  *
  * @param {{
  *   dataDir: string,
- *   writeEnabled: boolean,
+ *   canWrite: (request: import("node:http").IncomingMessage) => boolean,
  *   maxUploadBytes: number,
  *   parseSchematic: (bytes: Buffer) => unknown,
  *   loadAssetPack: (bytes: Buffer, fileName: string) => any
@@ -29,7 +29,7 @@ export class LibraryHttpError extends Error {
  */
 export function createLibraryApi({
   dataDir,
-  writeEnabled,
+  canWrite,
   maxUploadBytes,
   parseSchematic,
   loadAssetPack
@@ -71,16 +71,17 @@ export function createLibraryApi({
       const query = String(url.searchParams.get("query") || "").trim().toLocaleLowerCase();
       const entries = await schematicLibrary.list({ includeTrashed });
       const items = entries.filter((entry) => matchesQuery(entry, query)).map(latestSchematicView);
+      response.setHeader("cache-control", "no-store");
       sendJson(response, 200, {
         items,
         total: items.length,
-        capabilities: { canWrite: writeEnabled }
+        capabilities: { canWrite: canWrite(request) }
       });
       return true;
     }
 
     if (request.method === "POST" && url.pathname === SCHEMATIC_COLLECTION_PATH) {
-      requireWriteAccess();
+      requireWriteAccess(request);
       const entry = await importSchematic(request);
       sendJson(response, 201, latestSchematicView(entry));
       return true;
@@ -92,7 +93,7 @@ export function createLibraryApi({
     }
 
     if (request.method === "POST" && url.pathname === ASSET_COLLECTION_PATH) {
-      requireWriteAccess();
+      requireWriteAccess(request);
       await importAsset(request, response);
       return true;
     }
@@ -137,7 +138,7 @@ export function createLibraryApi({
     }
 
     if (request.method === "POST" && item.action === "versions") {
-      requireWriteAccess();
+      requireWriteAccess(request);
       if (entry.trashedAt) throw new LibraryHttpError(409, "Restore the schematic before adding a version.");
       const updated = await importSchematic(request, entry.id);
       sendJson(response, 201, latestSchematicView(updated));
@@ -145,13 +146,13 @@ export function createLibraryApi({
     }
 
     if (request.method === "POST" && item.action === "restore") {
-      requireWriteAccess();
+      requireWriteAccess(request);
       sendJson(response, 200, latestSchematicView(await schematicLibrary.restore(entry.id)));
       return true;
     }
 
     if (request.method === "DELETE" && item.action === "detail") {
-      requireWriteAccess();
+      requireWriteAccess(request);
       sendJson(response, 200, latestSchematicView(await schematicLibrary.trash(entry.id)));
       return true;
     }
@@ -161,7 +162,7 @@ export function createLibraryApi({
 
   async function importAsset(request, response) {
     await initialization;
-    requireWriteAccess();
+    requireWriteAccess(request);
     const body = await readRequestBody(request, maxUploadBytes);
     const fileName = String(request.headers["x-file-name"] || "asset-pack.jar");
     const summary = loadAssetPack(body, fileName);
@@ -202,9 +203,9 @@ export function createLibraryApi({
     });
   }
 
-  function requireWriteAccess() {
-    if (!writeEnabled) {
-      throw new LibraryHttpError(403, "Shared-library changes are disabled for this deployment.");
+  function requireWriteAccess(request) {
+    if (!canWrite(request)) {
+      throw new LibraryHttpError(403, "Shared-library changes are not authorized for this request.");
     }
   }
 

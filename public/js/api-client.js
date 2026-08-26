@@ -91,17 +91,6 @@ export function createApiClient({ baseUrl = "./api", fetchImpl = fetch } = {}) {
         bytes: new Uint8Array(await response.arrayBuffer()),
         log: decodeHeaderLog(response.headers.get("x-replacement-log"))
       };
-    },
-
-    async printLog(kind, text) {
-      const response = await request("logs/print", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind, text })
-      });
-      if (!response.ok) {
-        throw new Error(await errorMessage(response, "Could not print log to the server console."));
-      }
     }
   };
 }

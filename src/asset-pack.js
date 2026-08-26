@@ -73,6 +73,10 @@ export function getTexture(textureId) {
   return library.textures.get(textureId) || null;
 }
 
+export function localTextureUrl(textureId) {
+  return `./api/assets/textures/${encodeURIComponent(textureId)}`;
+}
+
 export function resolveBlockTextures(blockId) {
   const id = normalizeBlockId(blockId);
   const [namespace, path] = splitId(id);
@@ -134,7 +138,7 @@ function textureResponse(blockId, textures) {
     if (library.textures.has(normalized)) {
       resolved[face] = {
         id: normalized,
-        url: `/api/assets/textures/${encodeURIComponent(normalized)}`
+        url: localTextureUrl(normalized)
       };
     }
   }

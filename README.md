@@ -64,7 +64,7 @@ local machine:
 ```shell
 docker build --tag create-schematic-viewer .
 docker volume create create-schematic-viewer-data
-docker run --rm --publish 127.0.0.1:4173:4173 --env LIBRARY_WRITE_ENABLED=true --read-only --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m --volume create-schematic-viewer-data:/data create-schematic-viewer
+docker run --rm --publish 127.0.0.1:4173:4173 --env LIBRARY_WRITE_MODE=local --read-only --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m --volume create-schematic-viewer-data:/data create-schematic-viewer
 ```
 
 Liveness and readiness probes are available at `/healthz` and `/readyz`.
@@ -83,11 +83,16 @@ data and imported asset packs are stored under `.data` by default. Set
 immutable, content-addressed canonical objects; removing a card moves it to
 recoverable trash.
 
-Shared-library mutations are disabled by default. A trusted local curator can
-set `LIBRARY_WRITE_ENABLED=true` before starting the server; this reveals the
-add/trash/restore and asset-import controls. The flag is an operational safety
-boundary, not user authentication. Keep mutation routes behind LANtern's
-authenticated admin boundary when the viewer is embedded.
+Shared-library mutations are disabled by default. A trusted standalone curator
+can set `LIBRARY_WRITE_MODE=local`; this reveals the add/trash/restore and
+asset-import controls to every user that can reach that instance. The legacy
+`LIBRARY_WRITE_ENABLED=true` setting maps to local mode for compatibility.
+
+Embedded deployments should instead use `LIBRARY_WRITE_MODE=trusted-proxy`
+with a file-mounted token. This is a service-to-service authorization boundary,
+not an end-user login: the public proxy must authenticate administrators, strip
+client-supplied trusted headers, and inject the token only for approved
+requests. See the [LANtern embed contract](docs/lantern-embed-contract.md).
 
 ### Library backup and restore
 
@@ -131,16 +136,18 @@ Tests use synthetic fixtures and do not require Minecraft files. See
 ## Security and privacy
 
 Uploaded files are processed by the local Node and Python application. The
-server does not provide authentication, so do not expose it directly to the
-public internet or run untrusted uploads on a sensitive host. Review
+server does not provide end-user authentication, so do not expose it directly
+to the public internet or run untrusted uploads on a sensitive host. Review
 [SECURITY.md](SECURITY.md) for reporting guidance and operational cautions.
 
 ## LANtern integration
 
-Create Schematic Viewer is planned to become the schematic workspace inside
-the **LANtern Minecraft** UI. LANtern will own the surrounding product shell
-while this project remains a reusable viewer. That integration is planned work;
-it is not included in the current standalone application.
+Create Schematic Viewer defines a versioned reverse-proxy contract for the
+schematic workspace inside the **LANtern Minecraft** UI. LANtern owns the
+surrounding product shell and external port while this project remains an
+independently runnable viewer. The exact path, health, authorization, framing,
+and upload requirements are documented in the
+[LANtern embed contract](docs/lantern-embed-contract.md).
 
 ## Contributing and support
 
