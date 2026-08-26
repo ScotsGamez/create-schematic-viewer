@@ -10,7 +10,7 @@ import { assetSummary, getTexture, loadAssetPack, resolveBlockModel, resolveBloc
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
-const converterDir = join(root, "..", "litematic-converter");
+const converterDir = join(root, "converter");
 const converterScript = join(converterDir, "litematic_to_nbt.py");
 const replacementScript = join(root, "tools", "apply_replacements.py");
 const conversionTmpDir = join(root, ".tmp", "conversions");
@@ -20,11 +20,13 @@ const maxAssetPackBytes = 250 * 1024 * 1024;
 const defaultSplitMaxKb = Number(process.env.SPLIT_MAX_KB || 512);
 const previewBlockLimit = 1000000;
 const pythonCandidates = [
-  "C:\\Users\\Scotland\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+  join(root, ".venv", "Scripts", "python.exe"),
+  join(converterDir, ".venv", "Scripts", "python.exe"),
   process.env.PYTHON,
   "python",
   "py"
 ].filter(Boolean);
+let workingPython = null;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -404,18 +406,43 @@ async function pathExists(path) {
 
 async function runPythonScript(script, args, cwd) {
   let lastError = null;
+  if (workingPython) {
+    return spawnConverter(workingPython, [script, ...args], cwd);
+  }
+
   for (const python of pythonCandidates) {
     try {
+      await verifyConverterPython(python);
+      workingPython = python;
       return await spawnConverter(python, [script, ...args], cwd);
     } catch (error) {
       lastError = error;
-      if (error.code !== "ENOENT" && error.code !== "EPERM") {
+      if (error.code !== "ENOENT" && error.code !== "EPERM" && !error.message.includes("missing converter dependency")) {
         throw error;
       }
     }
   }
 
-  throw new Error(lastError?.message || "No Python executable was found for the litematic converter.");
+  throw new Error(lastError?.message || "No Python executable with nbtlib was found for the litematic converter.");
+}
+
+function verifyConverterPython(command) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, ["-c", "import nbtlib"], { windowsHide: true });
+    let stderr = "";
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${command} is missing converter dependency nbtlib. ${stderr}`.trim()));
+    });
+  });
 }
 
 function spawnConverter(command, args, cwd) {

@@ -4,6 +4,12 @@ A local browser GUI for inspecting Create mod NBT schematics.
 
 ## Run it
 
+Install the local Python converter dependencies once:
+
+```powershell
+npm run setup
+```
+
 Start the local app:
 
 ```powershell
@@ -54,7 +60,7 @@ Use the **Litematic Converter** panel in the sidebar:
 2. Click **Convert**.
 3. Download the generated `.nbt` or click **Load result** to inspect it immediately.
 
-The web app calls the converter at `../litematic-converter/litematic_to_nbt.py`.
+The web app uses the in-repo converter at `converter/litematic_to_nbt.py`, so a fresh clone has the converter code with the app. Python packages are installed into the local `.venv` by `npm run setup`.
 
 ## Planned next steps
 

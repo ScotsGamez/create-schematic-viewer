@@ -4,8 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup": "npm run setup:python",
+    "setup:python": "node tools/setup_python.js",
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check public/nbt.js && node --check public/schematic-parser.js && node --check src/nbt.js && node --check src/schematic.js"
+    "check": "node --check server.js && node --check public/app.js && node --check public/nbt.js && node --check public/schematic-parser.js && node --check src/nbt.js && node --check src/schematic.js && node --check tools/setup_python.js",
+    "check:converter": "cd converter && ..\\.venv\\Scripts\\python.exe -m pytest"
   },
   "engines": {
     "node": ">=18"
