@@ -1,4 +1,4 @@
-import { gunzipSync, inflateSync } from "node:zlib";
+import { gzipSync, gunzipSync, inflateSync } from "node:zlib";
 
 const TAG = {
   END: 0,
@@ -28,6 +28,12 @@ export function parseNbt(input) {
   const name = reader.string();
   const value = reader.payload(TAG.COMPOUND);
   return { name, value };
+}
+
+export function canonicalizeNbt(input) {
+  const uncompressed = decompressIfNeeded(input);
+  parseNbt(uncompressed);
+  return gzipSync(uncompressed, { level: 9 });
 }
 
 function decompressIfNeeded(buffer) {

@@ -18,6 +18,8 @@ schematic service.
 ## What it does
 
 - Previews vanilla structure `.nbt`, Sponge `.schem`, and zipped `.nbt` parts.
+- Maintains a searchable, persistent shared library of validated `.nbt`
+  schematics with generated previews, version-ready manifests, and soft delete.
 - Renders schematics in 3D with orbit, pan, zoom, layer slicing, grid, and
   transparency controls.
 - Inspects palettes, block counts, block positions, and orientation mappings.
@@ -61,7 +63,8 @@ local machine:
 
 ```shell
 docker build --tag create-schematic-viewer .
-docker run --rm --publish 127.0.0.1:4173:4173 --read-only --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m create-schematic-viewer
+docker volume create create-schematic-viewer-data
+docker run --rm --publish 127.0.0.1:4173:4173 --env LIBRARY_WRITE_ENABLED=true --read-only --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m --volume create-schematic-viewer-data:/data create-schematic-viewer
 ```
 
 Liveness and readiness probes are available at `/healthz` and `/readyz`.
@@ -73,6 +76,34 @@ Liveness and readiness probes are available at `/healthz` and `/readyz`.
 3. Select a supported schematic file.
 4. Inspect its blocks, layers, orientation, and replacement preview.
 5. Download a converted or modified `.nbt` file.
+
+Validated `.nbt` files can also be added to the **Schematic library**. Library
+data and imported asset packs are stored under `.data` by default. Set
+`DATA_DIR` to use a different location. Source uploads are retained alongside
+immutable, content-addressed canonical objects; removing a card moves it to
+recoverable trash.
+
+Shared-library mutations are disabled by default. A trusted local curator can
+set `LIBRARY_WRITE_ENABLED=true` before starting the server; this reveals the
+add/trash/restore and asset-import controls. The flag is an operational safety
+boundary, not user authentication. Keep mutation routes behind LANtern's
+authenticated admin boundary when the viewer is embedded.
+
+### Library backup and restore
+
+Stop the application before a backup or restore so the copied data represents
+one consistent point in time. Backup refuses to overwrite an existing target,
+and restore refuses to overwrite an existing data directory:
+
+```shell
+npm run library:backup -- ../schematic-library-backup-2026-08-26
+DATA_DIR=../restored-schematic-data npm run library:restore -- ../schematic-library-backup-2026-08-26
+```
+
+On PowerShell, set the restore destination first with
+`$env:DATA_DIR = "..\restored-schematic-data"`. See
+[Library operations](docs/library-operations.md) for storage and recovery
+details.
 
 To use an exported structure with Create, place the `.nbt` file in the
 appropriate client schematic directory and follow Create's in-game Schematic

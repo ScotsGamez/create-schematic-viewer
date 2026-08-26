@@ -1,6 +1,7 @@
 .git
 .github
 .tmp
+.data
 .venv
 node_modules
 coverage

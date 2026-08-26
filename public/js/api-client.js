@@ -27,7 +27,7 @@ export function createApiClient({ baseUrl = "./api", fetchImpl = fetch } = {}) {
 
   return {
     async loadAssetPack({ fileName, bytes }) {
-      const response = await request("assets/upload", {
+      const response = await request("v1/library/assets", {
         method: "POST",
         headers: {
           "content-type": "application/octet-stream",

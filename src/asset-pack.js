@@ -11,6 +11,7 @@ export function loadAssetPack(buffer, name = "asset-pack.jar") {
   const entries = readZipEntries(buffer);
   const pack = {
     name,
+    namespaces: new Set(),
     textures: new Map(),
     models: new Map(),
     blockstates: new Map()
@@ -23,6 +24,7 @@ export function loadAssetPack(buffer, name = "asset-pack.jar") {
     }
 
     const [, namespace, type, assetPath] = match;
+    pack.namespaces.add(namespace);
     if (type === "textures" && assetPath.endsWith(".png")) {
       const key = `${namespace}:${assetPath.replace(/\.png$/, "")}`;
       pack.textures.set(key, entry.data);
@@ -55,6 +57,7 @@ export function assetSummary() {
     name: library.packs.at(-1)?.name || null,
     packs: library.packs.map((pack) => ({
       name: pack.name,
+      namespaces: [...pack.namespaces].sort(),
       textures: pack.textures.size,
       models: pack.models.size,
       blockstates: pack.blockstates.size
