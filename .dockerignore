@@ -1,0 +1,15 @@
+.git
+.github
+.tmp
+.venv
+node_modules
+coverage
+dist
+converter/.venv
+converter/.pytest_cache
+converter/**/__pycache__
+converter/tests
+test
+*.log
+*.out.log
+*.err.log

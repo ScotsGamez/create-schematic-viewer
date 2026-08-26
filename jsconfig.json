@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "files": [
+    "public/js/api-client.js",
+    "public/js/orientation.js",
+    "public/js/replacements.js",
+    "public/js/schematic-data.js",
+    "src/server/schematic-upload.js"
+  ]
+}

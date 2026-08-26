@@ -10,10 +10,26 @@ gzipped vanilla structure NBT.
 
 ## Install
 
-Use Python 3.10 or newer.
+Use Python 3.10 or newer. From the repository root, the supported setup command
+creates a shared `.venv` and synchronizes the exact versions in `uv.lock` when
+[`uv`](https://docs.astral.sh/uv/) is available:
 
 ```bash
-pip install -r requirements.txt
+npm run setup
+```
+
+For standalone converter development, run from this directory:
+
+```bash
+uv sync --locked
+uv run pytest
+```
+
+On systems without `uv`, activate a virtual environment and install the
+hash-verified compatibility lock:
+
+```bash
+python -m pip install --require-hashes -r requirements.txt
 ```
 
 No Minecraft, Fabric, Forge, Litematica, game assets, or web services are
@@ -129,7 +145,7 @@ Minecraft version compatible with the source litematic.
 Run tests:
 
 ```bash
-pytest
+uv run pytest
 ```
 
 The tests use synthetic NBT fixtures and do not require Minecraft files.
