@@ -1,0 +1,13 @@
+{
+  "name": "create-schematic-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/nbt.js && node --check public/schematic-parser.js && node --check src/nbt.js && node --check src/schematic.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,12 @@
+.tmp/
+node_modules/
+__pycache__/
+*.pyc
+
+*.log
+*.out.log
+*.err.log
+
+tmp-*.nbt
+tmp-*.zip
+*-converted-test.nbt

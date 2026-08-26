@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Create Schematic Viewer</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark"></div>
+          <div>
+            <h1>Create Schematic Viewer</h1>
+            <p>NBT inspector and 3D hologram preview</p>
+          </div>
+        </div>
+
+        <label class="drop-zone" id="dropZone">
+          <input id="fileInput" type="file" accept=".nbt,.schematic,.schem,.zip,application/zip,application/octet-stream">
+          <span class="drop-title">Open schematic</span>
+          <span class="drop-copy">Drop a `.nbt`, `.schem`, or `.schematic` file here or choose one from disk.</span>
+        </label>
+
+        <section class="panel converter-panel">
+          <h2>Litematic Converter</h2>
+          <label class="asset-loader">
+            <input id="litematicInput" type="file" accept=".litematic,.schem,application/octet-stream">
+            <span>Choose .litematic or .schem</span>
+          </label>
+          <label class="field">
+            <span>Output</span>
+            <select id="converterSplitMode">
+              <option value="single">Keep as one .nbt</option>
+              <option value="split" selected>Split into layer parts when large</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Split size KB</span>
+            <input id="converterSplitKb" type="number" min="1" step="1" value="512">
+          </label>
+          <div class="button-row">
+            <button id="convertLitematic" type="button" disabled>Convert</button>
+            <button id="loadConverted" type="button" disabled>Load result</button>
+          </div>
+          <button id="showConverterLog" type="button">Show converter log in console</button>
+          <a id="downloadConverted" class="download-link" href="#" download="converted.nbt" hidden>Download converted .nbt</a>
+          <p class="texture-status" id="converterStatus">Convert Litematica or Sponge schematics to vanilla/Create-compatible .nbt.</p>
+        </section>
+
+        <section class="panel admin-panel">
+          <h2>Asset Admin</h2>
+          <label class="asset-loader">
+            <input id="assetPackInput" type="file" accept=".jar,.zip,application/java-archive,application/zip" multiple>
+            <span>Load mods/resource packs</span>
+          </label>
+          <dl class="asset-stats" id="assetStats">
+            <div><dt>Pack</dt><dd>None loaded</dd></div>
+            <div><dt>Textures</dt><dd>0</dd></div>
+            <div><dt>Models</dt><dd>0</dd></div>
+            <div><dt>Blockstates</dt><dd>0</dd></div>
+          </dl>
+          <div class="asset-pack-list" id="assetPackList"></div>
+        </section>
+
+        <section class="panel contents-panel">
+          <h2>Contents</h2>
+          <dl class="stats" id="stats">
+            <div><dt>File</dt><dd>None loaded</dd></div>
+            <div><dt>Blocks</dt><dd>-</dd></div>
+            <div><dt>Palette</dt><dd>-</dd></div>
+            <div><dt>Size</dt><dd>-</dd></div>
+          </dl>
+          <div class="warnings" id="warnings"></div>
+        </section>
+
+        <section class="panel controls-panel">
+          <h2>View</h2>
+          <label class="control">
+            <span>Layer</span>
+            <input id="layerSlider" type="range" min="0" max="0" value="0" disabled>
+            <strong id="layerLabel">All</strong>
+          </label>
+          <label class="check">
+            <input id="hologramToggle" type="checkbox" checked>
+            <span>Hologram material</span>
+          </label>
+          <label class="control">
+            <span>Opacity</span>
+            <input id="opacitySlider" type="range" min="20" max="100" value="76">
+            <strong id="opacityLabel">76%</strong>
+          </label>
+          <label class="control">
+            <span>Glass</span>
+            <input id="glassOpacitySlider" type="range" min="10" max="100" value="42">
+            <strong id="glassOpacityLabel">42%</strong>
+          </label>
+          <label class="check">
+            <input id="gridToggle" type="checkbox" checked>
+            <span>Show floor grid</span>
+          </label>
+          <label class="check">
+            <input id="textureToggle" type="checkbox" checked>
+            <span>Apply local face textures</span>
+          </label>
+          <div class="button-row">
+            <button id="resetCamera" type="button">Reset</button>
+            <button id="showAllLayers" type="button">All layers</button>
+          </div>
+          <p class="texture-status" id="textureStatus">Loaded local mods/resource packs provide 3D face textures and model geometry. Missing local assets use generated visible materials.</p>
+        </section>
+
+        <section class="panel orientation-panel">
+          <h2>Orientation</h2>
+          <label class="field">
+            <span>Block facing</span>
+            <select id="facingPreset">
+              <option value="minecraft">Minecraft default</option>
+              <option value="swap-ns">Swap N/S</option>
+              <option value="swap-ew">Swap E/W</option>
+              <option value="rotate-cw">Rotate 90 CW</option>
+              <option value="rotate-ccw">Rotate 90 CCW</option>
+              <option value="invert-all" selected>Invert all</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Schematic yaw</span>
+            <select id="schematicYaw">
+              <option value="0">0 degrees</option>
+              <option value="90">90 degrees</option>
+              <option value="180">180 degrees</option>
+              <option value="270">270 degrees</option>
+            </select>
+          </label>
+          <label class="check">
+            <input id="flipXToggle" type="checkbox">
+            <span>Flip X axis</span>
+          </label>
+          <label class="check">
+            <input id="flipZToggle" type="checkbox">
+            <span>Flip Z axis</span>
+          </label>
+          <button id="copyOrientation" type="button">Copy orientation JSON</button>
+          <p class="texture-status" id="orientationStatus">Default orientation: invert all facing directions.</p>
+        </section>
+
+        <section class="panel swap-panel">
+          <h2>Block swap preview</h2>
+          <select id="sourceBlock" disabled></select>
+          <input id="replacementBlock" type="text" placeholder="minecraft:stone_bricks" disabled>
+          <button id="replaceBlock" type="button" disabled>Preview replace</button>
+          <div class="family-swap">
+            <h3>Wood family swap</h3>
+            <div class="family-grid">
+              <label class="field">
+                <span>Find wood</span>
+                <select id="woodSource" disabled></select>
+              </label>
+              <label class="field">
+                <span>Make it</span>
+                <select id="woodTarget" disabled></select>
+              </label>
+            </div>
+            <div class="wood-match-list" id="woodMatchList"></div>
+            <div class="button-row">
+              <button id="previewWoodSwap" type="button" disabled>Preview wood swap</button>
+              <button id="writeReplacements" type="button" disabled>Write changes</button>
+            </div>
+            <button id="showReplacementLog" type="button">Show replacement log in console</button>
+            <a id="downloadModified" class="download-link" href="#" download="modified.nbt" hidden>Download modified schematic</a>
+            <p class="texture-status" id="replacementStatus">Pick a loaded schematic to build wood-family replacements.</p>
+          </div>
+        </section>
+
+        <section class="panel export-panel">
+          <h2>Item list exporter</h2>
+          <label class="field">
+            <span>Format</span>
+            <select id="itemExportFormat">
+              <option value="csv">CSV</option>
+              <option value="txt">TXT</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button id="exportItemList" type="button" disabled>Download list</button>
+            <button id="printItemList" type="button" disabled>Print list</button>
+          </div>
+          <a id="downloadItemList" class="download-link" hidden>Download item list</a>
+          <p class="texture-status" id="itemExportStatus">Load a schematic to export required blocks.</p>
+        </section>
+      </aside>
+
+      <main class="viewer-shell">
+        <div class="toolbar">
+          <div>
+            <strong id="viewerTitle">No schematic loaded</strong>
+            <span id="viewerSubtitle">Upload a Create, Sponge, or vanilla schematic to inspect it.</span>
+          </div>
+          <div class="hover-readout" id="hoverReadout">Hover a block</div>
+        </div>
+        <div id="viewer" class="viewer"></div>
+        <div class="palette-list" id="paletteList"></div>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="./nbt.js"></script>
+    <script src="./schematic-parser.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
