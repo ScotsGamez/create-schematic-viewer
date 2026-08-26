@@ -1,3 +1,36 @@
+import { createApiClient } from "./js/api-client.js";
+import {
+  blockShape,
+  isOpaqueFullCube,
+  shouldUseExplicitGeometry
+} from "./js/block-shapes.js";
+import {
+  arrayBufferToBase64,
+  baseFileName,
+  blockIdFromLabel,
+  isGzipNbt,
+  itemListCsv,
+  itemListRows,
+  itemListText,
+  modifiedFileName,
+  positionKey,
+  propertiesFromLabel
+} from "./js/schematic-data.js";
+import {
+  DEFAULT_ORIENTATION,
+  mappedProperties,
+  orientationProfile,
+  orientedPosition
+} from "./js/orientation.js";
+import {
+  replaceWoodInLabel,
+  WOOD_TYPES,
+  woodLabel,
+  woodMatches
+} from "./js/replacements.js";
+
+const api = createApiClient();
+
 const elements = {
   fileInput: document.querySelector("#fileInput"),
   litematicInput: document.querySelector("#litematicInput"),
@@ -55,13 +88,6 @@ const elements = {
   itemExportStatus: document.querySelector("#itemExportStatus")
 };
 
-const DEFAULT_ORIENTATION = {
-  facingPreset: "invert-all",
-  schematicYaw: 0,
-  flipX: false,
-  flipZ: false
-};
-
 const state = {
   schematic: null,
   currentFileName: "",
@@ -86,20 +112,6 @@ const state = {
   orientation: { ...DEFAULT_ORIENTATION }
 };
 
-const WOOD_TYPES = [
-  "oak",
-  "spruce",
-  "birch",
-  "jungle",
-  "acacia",
-  "dark_oak",
-  "mangrove",
-  "cherry",
-  "bamboo",
-  "crimson",
-  "warped",
-  "pale_oak"
-];
 const SPLIT_KB_STORAGE_KEY = "createSchematicViewer.splitMaxKb";
 
 const scene = new THREE.Scene();
@@ -125,7 +137,6 @@ const sun = new THREE.DirectionalLight("#ffffff", 2.2);
 sun.position.set(30, 60, 25);
 scene.add(sun);
 
-const boxGeometry = new THREE.BoxGeometry(0.995, 0.995, 0.995);
 const matrix = new THREE.Matrix4();
 const colorScratch = new THREE.Color();
 const textureLoader = new THREE.TextureLoader();
@@ -167,24 +178,11 @@ async function loadFile(file) {
 }
 
 async function loadAssetPack(file) {
-  if (!(location.protocol === "http:" || location.protocol === "https:")) {
-    updateAssetStats({ name: "Start with npm.cmd start", textures: 0, models: 0, blockstates: 0, namespaces: [] });
-    return;
-  }
-
   updateAssetStats({ name: `Loading ${file.name}...`, textures: "-", models: "-", blockstates: "-", namespaces: [] });
-  const response = await fetch("./api/assets/upload", {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      "x-file-name": file.name
-    },
-    body: await file.arrayBuffer()
+  const payload = await api.loadAssetPack({
+    fileName: file.name,
+    bytes: await file.arrayBuffer()
   });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "Unable to load asset pack.");
-  }
 
   state.assetPack = payload;
   textureCache.clear();
@@ -198,39 +196,24 @@ async function loadAssetPack(file) {
 }
 
 async function convertLitematicFile(file) {
-  if (!(location.protocol === "http:" || location.protocol === "https:")) {
-    throw new Error("Start the app with npm.cmd start before using the converter.");
-  }
-
   elements.converterStatus.textContent = `Converting ${file.name}...`;
-  const response = await fetch("./api/convert/litematic", {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      "x-file-name": file.name,
-      "x-split-mode": elements.converterSplitMode.value,
-      "x-split-max-kb": normalizedSplitKb()
-    },
-    body: await file.arrayBuffer()
-  });
-
-  if (!response.ok) {
-    let message = "Conversion failed.";
-    try {
-      const payload = await response.json();
-      message = payload.error || message;
-    } catch {
-      message = await response.text();
-    }
-    setOperationLog("converter", `Conversion failed for ${file.name}\n\n${message}`);
-    throw new Error(message);
+  const splitMode = elements.converterSplitMode.value;
+  const splitMaxKb = normalizedSplitKb();
+  let result;
+  try {
+    result = await api.convert({
+      fileName: file.name,
+      bytes: await file.arrayBuffer(),
+      splitMode,
+      splitMaxKb
+    });
+  } catch (error) {
+    setOperationLog("converter", `Conversion failed for ${file.name}\n\n${error.message}`);
+    throw error;
   }
 
-  setOperationLog("converter", decodeHeaderLog(response.headers.get("x-converter-log")) || `Converted ${file.name}; converter produced no stdout.`);
-  const outputKind = response.headers.get("x-converter-output") || "nbt";
-  const modeUsed = response.headers.get("x-split-mode-used") || elements.converterSplitMode.value;
-  const splitKbUsed = response.headers.get("x-split-max-kb-used") || normalizedSplitKb();
-  const blob = await response.blob();
+  const { blob, outputKind, modeUsed, splitKbUsed } = result;
+  setOperationLog("converter", result.log || `Converted ${file.name}; converter produced no stdout.`);
   const baseName = file.name.replace(/\.(litematic|schem)$/i, "") || "converted";
   const convertedName = outputKind === "zip" ? `${baseName}_parts.zip` : `${baseName}.nbt`;
 
@@ -269,20 +252,7 @@ function updateAssetStats(summary) {
 }
 
 async function parseSchematicFile(bytes) {
-  if (location.protocol === "http:" || location.protocol === "https:") {
-    const response = await fetch("./api/schematic", {
-      method: "POST",
-      headers: { "content-type": "application/octet-stream" },
-      body: bytes
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || "Unable to parse schematic.");
-    }
-    return payload;
-  }
-
-  return parseSchematic(bytes);
+  return api.parseSchematic(bytes);
 }
 
 function updateInspector() {
@@ -325,51 +295,8 @@ function updateInspector() {
   updatePaletteList();
 }
 
-function itemListRows() {
-  if (!state.schematic) {
-    return [];
-  }
-
-  const counts = new Map();
-  for (const entry of state.schematic.blockCounts) {
-    const label = state.replacements.get(entry.label) || entry.label;
-    counts.set(label, (counts.get(label) || 0) + entry.count);
-  }
-
-  return [...counts.entries()]
-    .map(([stateLabel, count]) => ({
-      id: blockIdFromLabel(stateLabel),
-      state: stateLabel,
-      count,
-      stacks: Math.floor(count / 64),
-      remainder: count % 64
-    }))
-    .sort((a, b) => b.count - a.count || a.state.localeCompare(b.state));
-}
-
-function itemListCsv(rows) {
-  const header = ["block_id", "block_state", "count", "stacks_64", "remainder"];
-  return [header, ...rows.map((row) => [row.id, row.state, row.count, row.stacks, row.remainder])]
-    .map((row) => row.map(csvCell).join(","))
-    .join("\r\n");
-}
-
-function itemListText(rows) {
-  const title = `Item list for ${state.currentFileName || "schematic"}`;
-  return [
-    title,
-    "=".repeat(title.length),
-    ...rows.map((row) => `${row.count.toLocaleString().padStart(7)}  ${String(row.stacks).padStart(4)}x64 + ${String(row.remainder).padStart(2)}  ${row.state}`)
-  ].join("\n");
-}
-
-function csvCell(value) {
-  const text = String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
 function downloadItemList() {
-  const rows = itemListRows();
+  const rows = itemListRows(state.schematic, state.replacements);
   if (!rows.length) {
     elements.itemExportStatus.textContent = "No blocks are available to export.";
     return;
@@ -379,7 +306,7 @@ function downloadItemList() {
     URL.revokeObjectURL(state.itemListUrl);
   }
   const format = elements.itemExportFormat.value === "txt" ? "txt" : "csv";
-  const content = format === "txt" ? itemListText(rows) : itemListCsv(rows);
+  const content = format === "txt" ? itemListText(rows, state.currentFileName) : itemListCsv(rows);
   const mime = format === "txt" ? "text/plain;charset=utf-8" : "text/csv;charset=utf-8";
   const fileName = `${baseFileName(state.currentFileName || "schematic")}_item_list.${format}`;
   state.itemListUrl = URL.createObjectURL(new Blob([content], { type: mime }));
@@ -391,34 +318,15 @@ function downloadItemList() {
 }
 
 async function printItemListToConsole() {
-  const rows = itemListRows();
+  const rows = itemListRows(state.schematic, state.replacements);
   if (!rows.length) {
     elements.itemExportStatus.textContent = "No blocks are available to print.";
     return;
   }
 
-  const text = itemListText(rows);
-  if (!(location.protocol === "http:" || location.protocol === "https:")) {
-    console.log(text);
-    elements.itemExportStatus.textContent = "Item list printed to browser console.";
-    return;
-  }
-  const response = await fetch("./api/logs/print", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ kind: "item-list", text })
-  });
-  if (!response.ok) {
-    throw new Error("Could not print item list to the server console.");
-  }
+  const text = itemListText(rows, state.currentFileName);
+  await api.printLog("item-list", text);
   elements.itemExportStatus.textContent = "Item list printed to the CMD console.";
-}
-
-function baseFileName(fileName) {
-  return String(fileName)
-    .replace(/\.[^.]+$/, "")
-    .replace(/[^a-zA-Z0-9._-]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "schematic";
 }
 
 function updatePaletteList() {
@@ -468,7 +376,7 @@ function updateWoodFamilyControls() {
 function renderWoodMatchList() {
   const sourceWood = elements.woodSource.value || "spruce";
   const targetWood = elements.woodTarget.value || "oak";
-  const matches = woodMatches(sourceWood);
+  const matches = woodMatches(state.schematic, sourceWood);
 
   if (!state.schematic) {
     elements.woodMatchList.innerHTML = "";
@@ -498,14 +406,6 @@ function renderWoodMatchList() {
   elements.replacementStatus.textContent = `${matches.length.toLocaleString()} ${woodLabel(sourceWood)} palette entries ready to preview.`;
 }
 
-function woodMatches(sourceWood) {
-  if (!state.schematic) {
-    return [];
-  }
-  const needle = woodToken(sourceWood);
-  return state.schematic.blockCounts.filter((entry) => blockIdFromLabel(entry.label).includes(needle));
-}
-
 function checkedWoodLabels() {
   return [...elements.woodMatchList.querySelectorAll("input[type='checkbox']:checked")]
     .map((input) => input.value);
@@ -522,20 +422,6 @@ function previewWoodSwap() {
   elements.replacementStatus.textContent = `Previewing ${selected.length.toLocaleString()} wood-family replacements.`;
   updatePaletteList();
   renderSchematic();
-}
-
-function replaceWoodInLabel(label, sourceWood, targetWood) {
-  const id = blockIdFromLabel(label);
-  const nextId = id.replaceAll(woodToken(sourceWood), woodToken(targetWood));
-  return `${nextId}${label.slice(id.length)}`;
-}
-
-function woodToken(wood) {
-  return String(wood).trim().toLowerCase().replace(/\s+/g, "_");
-}
-
-function woodLabel(wood) {
-  return woodToken(wood).split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
 }
 
 function loadSplitKbPreference() {
@@ -559,36 +445,22 @@ async function writeReplacementFile() {
   if (!state.replacements.size) {
     throw new Error("Preview at least one replacement before writing changes.");
   }
-  if (!(location.protocol === "http:" || location.protocol === "https:")) {
-    throw new Error("Start the app with npm.cmd start before writing replacement files.");
-  }
-
   clearModifiedDownload();
   elements.replacementStatus.textContent = "Writing modified schematic...";
-  const response = await fetch("./api/schematic/replacements", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+  let result;
+  try {
+    result = await api.writeReplacements({
       fileName: state.currentFileName,
       file: arrayBufferToBase64(state.sourceBytes),
       replacements: [...state.replacements.entries()].map(([from, to]) => ({ from, to }))
-    })
-  });
-
-  if (!response.ok) {
-    let message = "Unable to write replacement file.";
-    try {
-      const payload = await response.json();
-      message = payload.error || message;
-    } catch {
-      message = await response.text();
-    }
-    setOperationLog("replacements", `Replacement export failed for ${state.currentFileName}\n\n${message}`);
-    throw new Error(message);
+    });
+  } catch (error) {
+    setOperationLog("replacements", `Replacement export failed for ${state.currentFileName}\n\n${error.message}`);
+    throw error;
   }
 
-  setOperationLog("replacements", decodeHeaderLog(response.headers.get("x-replacement-log")) || `Wrote replacements for ${state.currentFileName}; writer produced no stdout.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  setOperationLog("replacements", result.log || `Wrote replacements for ${state.currentFileName}; writer produced no stdout.`);
+  const { bytes } = result;
   if (!isGzipNbt(bytes)) {
     const preview = new TextDecoder().decode(bytes.slice(0, 240));
     throw new Error(`Replacement export did not return a gzip NBT file. ${preview.trim()}`);
@@ -606,13 +478,6 @@ async function writeReplacementFile() {
   elements.replacementStatus.textContent = `Wrote ${modifiedName}.`;
 }
 
-function modifiedFileName(fileName) {
-  const match = String(fileName).match(/^(.*?)(\.[^.]+)?$/);
-  const base = match?.[1] || "schematic";
-  const extension = match?.[2] || ".nbt";
-  return `${base}-modified${extension}`;
-}
-
 function clearModifiedDownload() {
   if (state.modifiedUrl) {
     URL.revokeObjectURL(state.modifiedUrl);
@@ -622,21 +487,6 @@ function clearModifiedDownload() {
   elements.downloadModified.removeAttribute("download");
   elements.downloadModified.hidden = true;
   elements.writeReplacements.disabled = true;
-}
-
-function isGzipNbt(bytes) {
-  return bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-}
-
-function decodeHeaderLog(value) {
-  if (!value) {
-    return "";
-  }
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 function setOperationLog(kind, message) {
@@ -650,29 +500,7 @@ async function showOperationLog(kind) {
     target.textContent = "No log is available yet.";
   }
 
-  if (!(location.protocol === "http:" || location.protocol === "https:")) {
-    console.log(text || "No log is available yet.");
-    return;
-  }
-
-  const response = await fetch("./api/logs/print", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ kind, text: text || "No log is available yet." })
-  });
-  if (!response.ok) {
-    throw new Error("Could not print log to the server console.");
-  }
-}
-
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return btoa(binary);
+  await api.printLog(kind, text || "No log is available yet.");
 }
 
 async function renderSchematic() {
@@ -696,7 +524,7 @@ async function renderSchematic() {
   const solidOccupancy = new Set();
   visibleBlocks.forEach((block) => {
     const label = state.replacements.get(block.label) || block.label;
-    const orientedPos = orientedPosition(block.pos);
+    const orientedPos = orientedPosition(block.pos, schematic.size, state.orientation);
     const renderBlock = { ...block, pos: orientedPos };
     if (!groups.has(label)) {
       groups.set(label, []);
@@ -1021,7 +849,7 @@ function loadTextureUrl(url) {
 
 async function geometryForBlock(label) {
   const id = blockIdFromLabel(label);
-  const properties = mappedProperties(propertiesFromLabel(label));
+  const properties = mappedProperties(propertiesFromLabel(label), state.orientation.facingPreset);
   const key = `${id}|${JSON.stringify(properties)}|${JSON.stringify(state.orientation)}`;
 
   if (!geometryCache.has(key)) {
@@ -1038,13 +866,6 @@ async function geometryForBlock(label) {
     }
   }
   return geometryCache.get(key);
-}
-
-function shouldUseExplicitGeometry(id) {
-  return isKnownNonFullBlock(id) ||
-    id.includes("slab") || id.includes("stairs") || id.includes("pane") || id.includes("bars") ||
-    id.includes("fence") || id.includes("wall") || id.includes("door") || id.includes("trapdoor") ||
-    id.includes("lantern") || id.includes("chain");
 }
 
 function isFullUnitShape(shapeData) {
@@ -1097,248 +918,19 @@ function shapeFromMinecraftModel(model) {
   }));
 }
 
-function isOpaqueFullCube(label) {
-  const id = blockIdFromLabel(label);
-  if (isKnownNonFullBlock(id)) return false;
-  if (id.includes("glass") || id.includes("pane") || id.includes("bars")) return false;
-  if (id.includes("leaves") || id.includes("water") || id.includes("lava")) return false;
-  if (id.includes("slab") || id.includes("stairs") || id.includes("fence") || id.includes("wall")) return false;
-  if (id.includes("door") || id.includes("trapdoor") || id.includes("lantern") || id.includes("chain")) return false;
-  return true;
-}
-
 function createGeometryForBlock(id, properties) {
-  if (id.includes("scaffolding")) {
-    return shape(scaffoldBoxes());
-  }
-
-  if (isCrossPlant(id)) {
+  const descriptor = blockShape(id, properties);
+  if (descriptor.type === "cross") {
     return {
-      geometry: crossGeometry(0.95, id.includes("tall_grass") || id.includes("large_fern") ? 0.95 : 0.78),
-      offset: new THREE.Vector3(0, -0.08, 0)
+      geometry: crossGeometry(descriptor.width, descriptor.height),
+      offset: new THREE.Vector3(...descriptor.offset),
+      fullUnit: false
     };
   }
-
-  if (isCreatePipe(id)) {
-    return shape(pipeBoxes(properties));
-  }
-
-  if (id.includes("valve") || id.includes("faucet") || id.includes("spout") || id.includes("nozzle")) {
-    return shape(faucetBoxes(properties));
-  }
-
-  if (isCreateColumn(id)) {
-    return shape(columnBoxes(id, properties));
-  }
-
-  if (id.includes("torch") && !id.includes("redstone_wall_torch")) {
-    return shape([
-      { size: [0.14, 0.62, 0.14], offset: [0, -0.12, 0] },
-      { size: [0.22, 0.12, 0.22], offset: [0, 0.24, 0] }
-    ]);
-  }
-
-  if (id.includes("button")) {
-    return shape([buttonBox(properties)]);
-  }
-
-  if (id.includes("ladder")) {
-    return shape(ladderBoxes(properties));
-  }
-
-  if (id.includes("rail")) {
-    return shape([{ size: [0.995, 0.05, 0.995], offset: [0, -0.48, 0] }]);
-  }
-
-  if (id.includes("lever")) {
-    return shape([
-      { size: [0.28, 0.08, 0.28], offset: [0, -0.46, 0] },
-      { size: [0.12, 0.46, 0.12], offset: [0, -0.22, 0] }
-    ]);
-  }
-
-  if (id.includes("pressure_plate")) {
-    return shape([{ size: [0.78, 0.06, 0.78], offset: [0, -0.47, 0] }]);
-  }
-
-  if (id.includes("carpet")) {
-    return shape([{ size: [0.995, 0.06, 0.995], offset: [0, -0.47, 0] }]);
-  }
-
-  if (id.includes("pane") || id.includes("bars")) {
-    return shape(paneBoxes(properties));
-  }
-
-  if (id.includes("slab")) {
-    if (properties.type === "double") {
-      return shape([{ size: [0.995, 0.995, 0.995], offset: [0, 0, 0] }]);
-    }
-    return shape([{ size: [0.995, 0.495, 0.995], offset: [0, properties.type === "top" ? 0.25 : -0.25, 0] }]);
-  }
-
-  if (id.includes("stairs")) {
-    return shape(stairBoxes(properties));
-  }
-
-  if (id.includes("fence") || id.includes("wall")) {
-    return shape(postBoxes(properties));
-  }
-
-  if (id.includes("lantern")) {
-    return shape([
-      { size: [0.34, 0.48, 0.34], offset: [0, -0.08, 0] },
-      { size: [0.18, 0.12, 0.18], offset: [0, 0.25, 0] }
-    ]);
-  }
-
-  if (id.includes("chain")) {
-    return shape([{ size: [0.18, 0.995, 0.18], offset: [0, 0, 0] }]);
-  }
-
-  if (id.includes("trapdoor")) {
-    const open = properties.open === "true";
-    const top = properties.half === "top";
-    const vertical = trapdoorOpenBox(properties.facing || "north");
-    return shape([{
-      size: open ? vertical.size : [0.995, 0.16, 0.995],
-      offset: open ? vertical.offset : [0, top ? 0.42 : -0.42, 0]
-    }]);
-  }
-
-  if (id.includes("door")) {
-    return shape([verticalFacingBox(properties.facing)]);
-  }
-
-  return {
-    geometry: boxGeometry,
-    offset: new THREE.Vector3(0, 0, 0)
-  };
-}
-
-function isKnownNonFullBlock(id) {
-  return isCrossPlant(id) || isCreatePipe(id) || isCreateColumn(id) ||
-    id.includes("scaffolding") ||
-    id.includes("valve") || id.includes("faucet") || id.includes("spout") || id.includes("nozzle") ||
-    id.includes("torch") || id.includes("button") || id.includes("pressure_plate") || id.includes("carpet") ||
-    id.includes("ladder") || id.includes("rail") || id.includes("sign") || id.includes("banner") ||
-    id.includes("flower_pot") || id.includes("candle") || id.includes("lever") || id.includes("bell");
-}
-
-function isCrossPlant(id) {
-  return [
-    "flower", "grass", "fern", "sapling", "bush", "mushroom", "roots", "sprouts", "crop",
-    "wheat", "carrots", "potatoes", "beetroots", "nether_wart", "sugar_cane", "bamboo",
-    "tulip", "dandelion", "poppy", "orchid", "allium", "azure_bluet", "cornflower",
-    "lily_of_the_valley", "torchflower"
-  ].some((part) => id.includes(part)) && !id.includes("grass_block");
-}
-
-function isCreatePipe(id) {
-  return id.includes("pipe") || id.includes("tube") || id.includes("duct");
-}
-
-function isCreateColumn(id) {
-  return id.includes("girder") || id.includes("shaft") || id.includes("cogwheel") ||
-    id.includes("pole") || id.includes("post") || id.includes("beam") || id.includes("support") ||
-    (id.startsWith("create:") && (id.includes("pillar") || id.includes("column")));
-}
-
-function pipeBoxes(properties) {
-  const boxes = [{ size: [0.36, 0.36, 0.36], offset: [0, 0, 0] }];
-  const hasConnection = ["north", "south", "east", "west", "up", "down"].some((side) => connected(properties[side]));
-  const connectAll = !hasConnection;
-
-  if (connectAll || connected(properties.north)) boxes.push({ size: [0.26, 0.26, 0.5], offset: [0, 0, -0.25] });
-  if (connectAll || connected(properties.south)) boxes.push({ size: [0.26, 0.26, 0.5], offset: [0, 0, 0.25] });
-  if (connectAll || connected(properties.east)) boxes.push({ size: [0.5, 0.26, 0.26], offset: [0.25, 0, 0] });
-  if (connectAll || connected(properties.west)) boxes.push({ size: [0.5, 0.26, 0.26], offset: [-0.25, 0, 0] });
-  if (connectAll || connected(properties.up)) boxes.push({ size: [0.26, 0.5, 0.26], offset: [0, 0.25, 0] });
-  if (connectAll || connected(properties.down)) boxes.push({ size: [0.26, 0.5, 0.26], offset: [0, -0.25, 0] });
-  return boxes;
-}
-
-function columnBoxes(id, properties) {
-  const axis = properties.axis || properties.facing_axis || inferAxisFromFacing(properties.facing) || (id.includes("shaft") ? "x" : "y");
-  const girder = id.includes("girder") || id.includes("pillar") || id.includes("column");
-  const thickness = girder ? 0.34 : 0.28;
-  const main = axis === "x"
-    ? { size: [0.995, thickness, thickness], offset: [0, 0, 0] }
-    : axis === "z"
-      ? { size: [thickness, thickness, 0.995], offset: [0, 0, 0] }
-      : { size: [thickness, 0.995, thickness], offset: [0, 0, 0] };
-
-  if (!girder) return [main];
-
-  const cap = 0.46;
-  if (axis === "x") {
-    return [main, { size: [0.08, cap, cap], offset: [-0.46, 0, 0] }, { size: [0.08, cap, cap], offset: [0.46, 0, 0] }];
-  }
-  if (axis === "z") {
-    return [main, { size: [cap, cap, 0.08], offset: [0, 0, -0.46] }, { size: [cap, cap, 0.08], offset: [0, 0, 0.46] }];
-  }
-  return [main, { size: [cap, 0.08, cap], offset: [0, -0.46, 0] }, { size: [cap, 0.08, cap], offset: [0, 0.46, 0] }];
-}
-
-function inferAxisFromFacing(facing) {
-  if (facing === "east" || facing === "west") return "x";
-  if (facing === "north" || facing === "south") return "z";
-  if (facing === "up" || facing === "down") return "y";
-  return null;
-}
-
-function buttonBox(properties) {
-  const face = properties.face || "wall";
-  if (face === "floor") return { size: [0.42, 0.08, 0.32], offset: [0, -0.46, 0] };
-  if (face === "ceiling") return { size: [0.42, 0.08, 0.32], offset: [0, 0.46, 0] };
-  return verticalFacingBox(properties.facing || "north", 0.1);
-}
-
-function trapdoorOpenBox(facing) {
-  const dir = directionInfo(facing);
-  const depth = 0.16;
-  if (dir.axis === "x") {
-    return { size: [depth, 0.995, 0.995], offset: [dir.sign * (0.5 - depth / 2), 0, 0] };
-  }
-  return { size: [0.995, 0.995, depth], offset: [0, 0, dir.sign * (0.5 - depth / 2)] };
-}
-
-function faucetBoxes(properties) {
-  const facing = properties.facing || "north";
-  const stem = verticalFacingBox(facing, 0.18);
-  const head = facing === "east" || facing === "west"
-    ? { size: [0.34, 0.26, 0.26], offset: [stem.offset[0] * 0.7, 0, 0] }
-    : { size: [0.26, 0.26, 0.34], offset: [0, 0, stem.offset[2] * 0.7] };
-  return [
-    { size: stem.size, offset: stem.offset },
-    head,
-    { size: [0.18, 0.34, 0.18], offset: [0, -0.22, 0] }
-  ];
-}
-
-function scaffoldBoxes() {
-  const post = 0.12;
-  return [
-    { size: [post, 0.995, post], offset: [-0.42, 0, -0.42] },
-    { size: [post, 0.995, post], offset: [0.42, 0, -0.42] },
-    { size: [post, 0.995, post], offset: [-0.42, 0, 0.42] },
-    { size: [post, 0.995, post], offset: [0.42, 0, 0.42] },
-    { size: [0.995, 0.08, 0.995], offset: [0, 0.46, 0] }
-  ];
-}
-
-function ladderBoxes(properties) {
-  const face = verticalFacingBox(properties.facing || "north", 0.08);
-  const rungDepth = face.size[0] < face.size[2] ? [0.08, 0.08, 0.76] : [0.76, 0.08, 0.08];
-  const railDepth = face.size[0] < face.size[2] ? [0.08, 0.995, 0.08] : [0.08, 0.995, 0.08];
-  const xWall = face.size[0] < face.size[2];
-  return [
-    { size: face.size, offset: face.offset },
-    { size: rungDepth, offset: [face.offset[0], -0.24, face.offset[2]] },
-    { size: rungDepth, offset: [face.offset[0], 0.05, face.offset[2]] },
-    { size: rungDepth, offset: [face.offset[0], 0.34, face.offset[2]] },
-    { size: railDepth, offset: xWall ? [face.offset[0], 0, -0.28] : [-0.28, 0, face.offset[2]] },
-    { size: railDepth, offset: xWall ? [face.offset[0], 0, 0.28] : [0.28, 0, face.offset[2]] }
-  ];
+  const boxes = descriptor.type === "boxes"
+    ? descriptor.boxes
+    : [{ size: descriptor.size, offset: descriptor.offset }];
+  return shape(boxes);
 }
 
 function faceCulledMesh(label, blocks, material, solidOccupancy, faceMaterials) {
@@ -1435,16 +1027,6 @@ const CUBE_FACES = [
   }
 ];
 
-const CARDINALS = ["north", "south", "east", "west"];
-
-function connectionBox(side, zAxisSize, xAxisSize) {
-  const dir = directionInfo(side);
-  if (dir.axis === "x") {
-    return { size: [...xAxisSize], offset: [dir.sign * 0.25, 0, 0] };
-  }
-  return { size: [...zAxisSize], offset: [0, 0, dir.sign * 0.25] };
-}
-
 function shape(boxes) {
   return {
     geometry: shapeGeometry(boxes),
@@ -1453,76 +1035,6 @@ function shape(boxes) {
       boxes[0].size.every((part) => part >= 0.98) &&
       boxes[0].offset.every((part) => Math.abs(part) < 0.01)
   };
-}
-
-function paneBoxes(properties) {
-  const boxes = [{ size: [0.18, 0.995, 0.18], offset: [0, 0, 0] }];
-  const any = CARDINALS.some((side) => properties[side] === "true");
-
-  for (const side of CARDINALS) {
-    if (properties[side] === "true") {
-      boxes.push(connectionBox(side, [0.18, 0.995, 0.5], [0.5, 0.995, 0.18]));
-    }
-  }
-
-  if (!any) {
-    boxes.push({ size: [0.18, 0.995, 0.995], offset: [0, 0, 0] });
-  }
-  return boxes;
-}
-
-function stairBoxes(properties) {
-  const top = properties.half === "top";
-  const lowerY = top ? 0.25 : -0.25;
-  const upperY = top ? -0.25 : 0.25;
-  const facing = properties.facing || "north";
-  const dir = directionInfo(facing);
-  const upperOffset = dir.axis === "x"
-    ? [dir.sign * 0.25, upperY, 0]
-    : [0, upperY, dir.sign * 0.25];
-  const upperSize = dir.axis === "x"
-    ? [0.5, 0.495, 0.995]
-    : [0.995, 0.495, 0.5];
-
-  return [
-    { size: [0.995, 0.495, 0.995], offset: [0, lowerY, 0] },
-    { size: upperSize, offset: upperOffset }
-  ];
-}
-
-function postBoxes(properties) {
-  const boxes = [{ size: [0.28, 0.995, 0.28], offset: [0, 0, 0] }];
-  for (const side of CARDINALS) {
-    if (connected(properties[side])) {
-      const box = connectionBox(side, [0.22, 0.76, 0.5], [0.5, 0.76, 0.22]);
-      box.offset[1] = -0.08;
-      boxes.push(box);
-    }
-  }
-  return boxes;
-}
-
-function connected(value) {
-  return value === "true" || value === "low" || value === "tall";
-}
-
-function verticalFacingBox(facing, depth = 0.16) {
-  const dir = directionInfo(facing);
-  const offset = dir.sign * (0.5 - depth / 2);
-  if (dir.axis === "x") return { size: [depth, 0.995, 0.995], offset: [offset, 0, 0] };
-  return { size: [0.995, 0.995, depth], offset: [0, 0, offset] };
-}
-
-function directionInfo(facing = "north") {
-  const directions = {
-    north: { axis: "z", sign: -1, vector: [0, 0, -1], opposite: "south" },
-    south: { axis: "z", sign: 1, vector: [0, 0, 1], opposite: "north" },
-    west: { axis: "x", sign: -1, vector: [-1, 0, 0], opposite: "east" },
-    east: { axis: "x", sign: 1, vector: [1, 0, 0], opposite: "west" },
-    up: { axis: "y", sign: 1, vector: [0, 1, 0], opposite: "down" },
-    down: { axis: "y", sign: -1, vector: [0, -1, 0], opposite: "up" }
-  };
-  return directions[facing] || directions.north;
 }
 
 function shapeGeometry(boxes) {
@@ -1588,77 +1100,6 @@ function blockIconUrl(label) {
     return `./api/assets/blocks/${blockId}/preview`;
   }
   return "";
-}
-
-function blockIdFromLabel(label) {
-  return String(label).split("[")[0].trim();
-}
-
-function positionKey(x, y, z) {
-  return `${x},${y},${z}`;
-}
-
-function propertiesFromLabel(label) {
-  const match = String(label).match(/\[(.*)\]$/);
-  if (!match) {
-    return {};
-  }
-
-  return Object.fromEntries(
-    match[1]
-      .split(",")
-      .map((part) => part.split("="))
-      .filter(([key, value]) => key && value !== undefined)
-  );
-}
-
-function orientedPosition(pos) {
-  const size = state.schematic?.size || { x: 0, z: 0 };
-  let x = pos.x;
-  let z = pos.z;
-
-  if (state.orientation.flipX) x = size.x - 1 - x;
-  if (state.orientation.flipZ) z = size.z - 1 - z;
-
-  const yaw = Number(state.orientation.schematicYaw || 0);
-  if (yaw === 90) {
-    return { x: size.z - 1 - z, y: pos.y, z: x };
-  }
-  if (yaw === 180) {
-    return { x: size.x - 1 - x, y: pos.y, z: size.z - 1 - z };
-  }
-  if (yaw === 270) {
-    return { x: z, y: pos.y, z: size.x - 1 - x };
-  }
-  return { x, y: pos.y, z };
-}
-
-function mapFacing(facing) {
-  const preset = state.orientation.facingPreset;
-  const maps = {
-    minecraft: { north: "north", south: "south", east: "east", west: "west", up: "up", down: "down" },
-    "swap-ns": { north: "south", south: "north", east: "east", west: "west", up: "up", down: "down" },
-    "swap-ew": { north: "north", south: "south", east: "west", west: "east", up: "up", down: "down" },
-    "rotate-cw": { north: "east", east: "south", south: "west", west: "north", up: "up", down: "down" },
-    "rotate-ccw": { north: "west", west: "south", south: "east", east: "north", up: "up", down: "down" },
-    "invert-all": { north: "south", south: "north", east: "west", west: "east", up: "up", down: "down" }
-  };
-  return maps[preset]?.[facing] || facing;
-}
-
-function mappedProperties(properties) {
-  const mapped = { ...properties };
-  if (mapped.facing) {
-    mapped.facing = mapFacing(mapped.facing);
-  }
-
-  for (const [a, b] of [["north", "south"], ["east", "west"]]) {
-    const mappedA = mapFacing(a);
-    const mappedB = mapFacing(b);
-    if (properties[a] !== undefined) mapped[mappedA] = properties[a];
-    if (properties[b] !== undefined) mapped[mappedB] = properties[b];
-  }
-  return mapped;
 }
 
 function updateTextureStatus(message) {
@@ -1860,7 +1301,7 @@ for (const element of [elements.facingPreset, elements.schematicYaw, elements.fl
 
 elements.copyOrientation.addEventListener("click", async () => {
   updateOrientationFromControls();
-  const profile = orientationProfile();
+  const profile = orientationProfile(state.orientation);
   const text = JSON.stringify(profile, null, 2);
   try {
     await navigator.clipboard.writeText(text);
@@ -1951,26 +1392,4 @@ function updateOrientationFromControls() {
     flipZ: elements.flipZToggle.checked
   };
   elements.orientationStatus.textContent = `${state.orientation.facingPreset}, yaw ${state.orientation.schematicYaw}, flipX ${state.orientation.flipX}, flipZ ${state.orientation.flipZ}`;
-}
-
-function orientationProfile() {
-  return {
-    type: "create-schematic-viewer-orientation",
-    version: 1,
-    note: "Use this as the default orientation profile for future schematics if this view matches Minecraft.",
-    orientation: { ...state.orientation },
-    facingMap: {
-      north: mapFacing("north"),
-      south: mapFacing("south"),
-      east: mapFacing("east"),
-      west: mapFacing("west"),
-      up: mapFacing("up"),
-      down: mapFacing("down")
-    },
-    schematicTransform: {
-      yawDegrees: state.orientation.schematicYaw,
-      flipX: state.orientation.flipX,
-      flipZ: state.orientation.flipZ
-    }
-  };
 }
