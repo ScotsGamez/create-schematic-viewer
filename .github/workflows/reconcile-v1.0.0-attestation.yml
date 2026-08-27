@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: false
+      confirm_registry_quiescent:
+        description: Confirm no other client is writing this GHCR package
+        required: true
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -21,7 +26,8 @@ jobs:
     if: >-
       github.repository == 'ScotsGamez/create-schematic-viewer' &&
       github.ref == 'refs/heads/main' &&
-      inputs.confirm == true
+      inputs.confirm == true &&
+      inputs.confirm_registry_quiescent == true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: attestation-recovery
@@ -35,6 +41,7 @@ jobs:
       RELEASE_TAG: v1.0.0
       SOURCE_COMMIT: f7a4a5b06db10d3974cdea270e4fe92a3721b4b0
       EXPECTED_DIGEST: sha256:d8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3
+      REFERRERS_TAG: sha256-d8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3
       PLATFORM_DIGEST: sha256:d0553e08cf50e10cd51d774cad84576dd155c6de5de081ef27a10a2ecb450473
       ATTESTATION_SOURCE_COMMIT: 8ce0edb3c2ddbfed4eb4f0282eaa2e3383471720
       FAILED_RUN_ID: "33083716510"
@@ -288,16 +295,64 @@ jobs:
           chmod 600 "$ORAS_CONFIG"
 
           registry_subject="$IMAGE_NAME@$EXPECTED_DIGEST"
+          test "$REFERRERS_TAG" = "${EXPECTED_DIGEST/:/-}"
           before="$RECONCILIATION_WORK/oci-before.json"
           oras discover \
             --registry-config "$ORAS_CONFIG" \
-            --distribution-spec v1.1-referrers-api \
-            --artifact-type "$BUNDLE_MEDIA_TYPE" \
+            --distribution-spec v1.1-referrers-tag \
+            --depth 1 \
             --format json \
             "$registry_subject" >"$before"
 
+          jq --exit-status '
+            (.referrers // []) as $refs |
+            ($refs | length) == ($refs | unique_by(.digest) | length) and
+            all(
+              $refs[];
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              (.artifactType | type) == "string" and
+              (.size | type) == "number" and .size > 0 and
+              (.digest | test("^sha256:[0-9a-f]{64}$"))
+            )
+          ' "$before" >/dev/null
+          jq --sort-keys --compact-output '
+            [(.referrers // [])[] |
+              del(.reference, .referrers)
+            ] | sort_by(.digest)
+          ' "$before" >"$RECONCILIATION_WORK/registry-before-canonical.json"
+
+          pre_index_descriptor="$RECONCILIATION_WORK/pre-index-descriptor.json"
+          pre_index_error="$RECONCILIATION_WORK/pre-index-error.txt"
+          if oras manifest fetch \
+            --registry-config "$ORAS_CONFIG" \
+            --descriptor \
+            "$IMAGE_NAME:$REFERRERS_TAG" \
+            >"$pre_index_descriptor" 2>"$pre_index_error"; then
+            pre_index_digest=$(jq --exit-status --raw-output '
+              select(
+                .mediaType == "application/vnd.oci.image.index.v1+json" and
+                (.size | type) == "number" and .size > 0 and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))
+              ) |
+              .digest
+            ' "$pre_index_descriptor")
+          elif grep --ignore-case --quiet 'failed to find .*: not found' \
+            "$pre_index_error" && \
+            jq --exit-status 'length == 0' \
+              "$RECONCILIATION_WORK/registry-before-canonical.json" >/dev/null; then
+            pre_index_digest=absent
+          else
+            cat "$pre_index_error" >&2
+            exit 1
+          fi
+          rm --force "$pre_index_error"
+
           release_count=$(jq --raw-output \
-            '(.referrers // []) | length' "$before")
+            --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+              [(.referrers // [])[] |
+                select(.artifactType == $bundle_type)] |
+              length
+            ' "$before")
 
           case "$release_count" in
             0)
@@ -305,7 +360,31 @@ jobs:
               ;;
             1)
               referrer_digest=$(jq --raw-output \
-                '.referrers[0].digest' "$before")
+                --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+                  (.referrers // [])[] |
+                  select(.artifactType == $bundle_type) |
+                  .digest
+                ' "$before")
+              oras manifest fetch \
+                --registry-config "$ORAS_CONFIG" \
+                "$IMAGE_NAME:$REFERRERS_TAG" \
+                >"$RECONCILIATION_WORK/existing-referrers-index.json"
+              jq --exit-status '
+                .schemaVersion == 2 and
+                .mediaType == "application/vnd.oci.image.index.v1+json" and
+                (.manifests | type) == "array" and
+                (.manifests | length) ==
+                  (.manifests | unique_by(.digest) | length)
+              ' "$RECONCILIATION_WORK/existing-referrers-index.json" >/dev/null
+              jq --sort-keys --compact-output '
+                [.manifests[] |
+                  del(.reference, .referrers)
+                ] | sort_by(.digest)
+              ' "$RECONCILIATION_WORK/existing-referrers-index.json" \
+                >"$RECONCILIATION_WORK/existing-index-canonical.json"
+              cmp --silent \
+                "$RECONCILIATION_WORK/registry-before-canonical.json" \
+                "$RECONCILIATION_WORK/existing-index-canonical.json"
               oras manifest fetch \
                 --registry-config "$ORAS_CONFIG" \
                 "$IMAGE_NAME@$referrer_digest" \
@@ -350,6 +429,7 @@ jobs:
           esac
 
           printf 'action=%s\n' "$action" >>"$GITHUB_OUTPUT"
+          printf 'pre_index_digest=%s\n' "$pre_index_digest" >>"$GITHUB_OUTPUT"
 
       - name: Authenticate to GHCR for reconciliation
         if: steps.registry_plan.outputs.action == 'attach'
@@ -363,6 +443,68 @@ jobs:
             --password-stdin \
             --registry-config "$ORAS_CONFIG"
 
+      - name: Confirm registry snapshot before attachment
+        if: steps.registry_plan.outputs.action == 'attach'
+        shell: bash
+        env:
+          PRE_INDEX_DIGEST: ${{ steps.registry_plan.outputs.pre_index_digest }}
+        run: |
+          set -euo pipefail
+          pre_attach="$RECONCILIATION_WORK/oci-pre-attach.json"
+          oras discover \
+            --registry-config "$ORAS_CONFIG" \
+            --distribution-spec v1.1-referrers-tag \
+            --depth 1 \
+            --format json \
+            "$IMAGE_NAME@$EXPECTED_DIGEST" >"$pre_attach"
+
+          jq --exit-status '
+            (.referrers // []) as $refs |
+            ($refs | length) == ($refs | unique_by(.digest) | length) and
+            all(
+              $refs[];
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              (.artifactType | type) == "string" and
+              (.size | type) == "number" and .size > 0 and
+              (.digest | test("^sha256:[0-9a-f]{64}$"))
+            )
+          ' "$pre_attach" >/dev/null
+          jq --sort-keys --compact-output '
+            [(.referrers // [])[] |
+              del(.reference, .referrers)
+            ] | sort_by(.digest)
+          ' "$pre_attach" \
+            >"$RECONCILIATION_WORK/registry-pre-attach-canonical.json"
+          cmp --silent \
+            "$RECONCILIATION_WORK/registry-before-canonical.json" \
+            "$RECONCILIATION_WORK/registry-pre-attach-canonical.json"
+
+          current_descriptor="$RECONCILIATION_WORK/pre-attach-index-descriptor.json"
+          current_error="$RECONCILIATION_WORK/pre-attach-index-error.txt"
+          if oras manifest fetch \
+            --registry-config "$ORAS_CONFIG" \
+            --descriptor \
+            "$IMAGE_NAME:$REFERRERS_TAG" \
+            >"$current_descriptor" 2>"$current_error"; then
+            current_index_digest=$(jq --exit-status --raw-output '
+              select(
+                .mediaType == "application/vnd.oci.image.index.v1+json" and
+                (.size | type) == "number" and .size > 0 and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))
+              ) |
+              .digest
+            ' "$current_descriptor")
+          elif grep --ignore-case --quiet 'failed to find .*: not found' \
+            "$current_error" && \
+            [[ "$PRE_INDEX_DIGEST" == absent ]]; then
+            current_index_digest=absent
+          else
+            cat "$current_error" >&2
+            exit 1
+          fi
+          rm --force "$current_error"
+          test "$current_index_digest" = "$PRE_INDEX_DIGEST"
+
       - name: Attach the verified bundle to GHCR
         if: steps.registry_plan.outputs.action == 'attach'
         id: reconcile_registry
@@ -373,7 +515,7 @@ jobs:
             cd "$RECONCILIATION_WORK"
             oras attach \
               --registry-config "$ORAS_CONFIG" \
-              --distribution-spec v1.1-referrers-api \
+              --distribution-spec v1.1-referrers-tag \
               --artifact-type "$BUNDLE_MEDIA_TYPE" \
               --annotation 'dev.sigstore.bundle.content=dsse-envelope' \
               --annotation "dev.sigstore.bundle.predicateType=$RELEASE_PREDICATE_TYPE" \
@@ -382,12 +524,27 @@ jobs:
               "bundle.json:$BUNDLE_MEDIA_TYPE" \
               >"$RECONCILIATION_WORK/attach.json"
           )
+          attach_digest=$(jq --exit-status --raw-output \
+            --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+              select(
+                .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                .artifactType == $bundle_type and
+                (.size | type) == "number" and .size > 0 and
+                (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                .annotations["dev.sigstore.bundle.content"] == "dsse-envelope" and
+                .annotations["dev.sigstore.bundle.predicateType"] ==
+                  env.RELEASE_PREDICATE_TYPE
+              ) |
+              .digest
+            ' "$RECONCILIATION_WORK/attach.json")
+          printf 'attach_digest=%s\n' "$attach_digest" >>"$GITHUB_OUTPUT"
 
       - name: Verify the reconciled registry state
         id: verify_registry
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          REGISTRY_ACTION: ${{ steps.registry_plan.outputs.action }}
         run: |
           set -euo pipefail
           registry_subject="$IMAGE_NAME@$EXPECTED_DIGEST"
@@ -396,19 +553,105 @@ jobs:
 
           oras discover \
             --registry-config "$ORAS_CONFIG" \
-            --distribution-spec v1.1-referrers-api \
-            --artifact-type "$BUNDLE_MEDIA_TYPE" \
+            --distribution-spec v1.1-referrers-tag \
+            --depth 1 \
             --format json \
             "$registry_subject" >"$after"
 
+          jq --exit-status '
+            (.referrers // []) as $refs |
+            ($refs | length) == ($refs | unique_by(.digest) | length) and
+            all(
+              $refs[];
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              (.artifactType | type) == "string" and
+              (.size | type) == "number" and .size > 0 and
+              (.digest | test("^sha256:[0-9a-f]{64}$"))
+            )
+          ' "$after" >/dev/null
+          jq --sort-keys --compact-output '
+            [(.referrers // [])[] |
+              del(.reference, .referrers)
+            ] | sort_by(.digest)
+          ' "$after" >"$RECONCILIATION_WORK/registry-after-canonical.json"
+
           release_count_after=$(jq --raw-output \
-            '(.referrers // []) | length' "$after")
+            --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+              [(.referrers // [])[] |
+                select(.artifactType == $bundle_type)] |
+              length
+            ' "$after")
           if [[ "$release_count_after" != 1 ]]; then
             printf 'Expected one reconciled release bundle, found %s.\n' \
               "$release_count_after" >&2
             exit 1
           fi
-          referrer_digest=$(jq --raw-output '.referrers[0].digest' "$after")
+          referrer_digest=$(jq --raw-output \
+            --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+              (.referrers // [])[] |
+              select(.artifactType == $bundle_type) |
+              .digest
+            ' "$after")
+
+          oras manifest fetch \
+            --registry-config "$ORAS_CONFIG" \
+            "$IMAGE_NAME:$REFERRERS_TAG" \
+            >"$RECONCILIATION_WORK/referrers-index.json"
+          jq --exit-status '
+            .schemaVersion == 2 and
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            (.manifests | type) == "array" and
+            (.manifests | length) ==
+              (.manifests | unique_by(.digest) | length)
+          ' "$RECONCILIATION_WORK/referrers-index.json" >/dev/null
+          jq --sort-keys --compact-output '
+            [.manifests[] |
+              del(.reference, .referrers)
+            ] | sort_by(.digest)
+          ' "$RECONCILIATION_WORK/referrers-index.json" \
+            >"$RECONCILIATION_WORK/referrers-index-canonical.json"
+          cmp --silent \
+            "$RECONCILIATION_WORK/registry-after-canonical.json" \
+            "$RECONCILIATION_WORK/referrers-index-canonical.json"
+
+          case "$REGISTRY_ACTION" in
+            attach)
+              attach_digest=$(jq --raw-output \
+                --arg bundle_type "$BUNDLE_MEDIA_TYPE" '
+                  select(
+                    .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                    .artifactType == $bundle_type and
+                    (.size | type) == "number" and .size > 0 and
+                    (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                    .annotations["dev.sigstore.bundle.content"] == "dsse-envelope" and
+                    .annotations["dev.sigstore.bundle.predicateType"] ==
+                      env.RELEASE_PREDICATE_TYPE
+                  ) |
+                  .digest
+                ' "$RECONCILIATION_WORK/attach.json")
+              test "$attach_digest" = "$referrer_digest"
+              jq --sort-keys --compact-output \
+                --slurpfile after \
+                  "$RECONCILIATION_WORK/registry-after-canonical.json" \
+                --arg digest "$attach_digest" '
+                  . + [($after[0][] | select(.digest == $digest))] |
+                  sort_by(.digest)
+                ' "$RECONCILIATION_WORK/registry-before-canonical.json" \
+                >"$RECONCILIATION_WORK/registry-expected-after-canonical.json"
+              cmp --silent \
+                "$RECONCILIATION_WORK/registry-expected-after-canonical.json" \
+                "$RECONCILIATION_WORK/registry-after-canonical.json"
+              ;;
+            verify-only)
+              cmp --silent \
+                "$RECONCILIATION_WORK/registry-before-canonical.json" \
+                "$RECONCILIATION_WORK/registry-after-canonical.json"
+              ;;
+            *)
+              printf 'Unexpected registry action: %s\n' "$REGISTRY_ACTION" >&2
+              exit 1
+              ;;
+          esac
 
           oras manifest fetch \
             --registry-config "$ORAS_CONFIG" \
@@ -492,21 +735,119 @@ jobs:
           printf 'referrer_digest=%s\n' "$referrer_digest" >>"$GITHUB_OUTPUT"
 
       - name: Record reconciliation evidence
+        if: always()
+        id: record_evidence
         shell: bash
         env:
           RECONCILIATION_ACTION: ${{ steps.registry_plan.outputs.action }}
+          PRE_INDEX_DIGEST: ${{ steps.registry_plan.outputs.pre_index_digest }}
+          ATTACH_DIGEST: ${{ steps.reconcile_registry.outputs.attach_digest }}
           REFERRER_DIGEST: ${{ steps.verify_registry.outputs.referrer_digest }}
+          PLAN_OUTCOME: ${{ steps.registry_plan.outcome }}
+          ATTACH_OUTCOME: ${{ steps.reconcile_registry.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.verify_registry.outcome }}
         run: |
           set -euo pipefail
+          evidence="$RUNNER_TEMP/reconciliation-evidence"
+          install --directory --mode=700 "$evidence"
+          printf 'path=%s\n' "$evidence" >>"$GITHUB_OUTPUT"
+          printf 'incomplete\n' >"$evidence/collection-status.txt"
+
+          pre_index_digest="${PRE_INDEX_DIGEST:-not-observed}"
+          attach_digest="${ATTACH_DIGEST:-not-created}"
+          referrer_digest="${REFERRER_DIGEST:-not-verified}"
+          post_index_digest=not-observed
+          post_descriptor="$evidence/post-index-descriptor.json"
+          post_error="$RUNNER_TEMP/reconciliation-post-index-error.txt"
+          if command -v oras >/dev/null 2>&1 && \
+            [[ -n "${ORAS_CONFIG:-}" && -f "$ORAS_CONFIG" ]] && \
+            oras manifest fetch \
+              --registry-config "$ORAS_CONFIG" \
+              --descriptor \
+              "$IMAGE_NAME:$REFERRERS_TAG" \
+              >"$post_descriptor" 2>"$post_error"; then
+            post_index_digest=$(jq --raw-output '
+              select(
+                .mediaType == "application/vnd.oci.image.index.v1+json" and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))
+              ) |
+              .digest
+            ' "$post_descriptor")
+            if [[ -z "$post_index_digest" ]]; then
+              post_index_digest=invalid
+            fi
+          elif [[ -f "$post_error" ]] && \
+            grep --ignore-case --quiet 'failed to find .*: not found' \
+              "$post_error"; then
+            post_index_digest=absent
+            rm --force "$post_descriptor"
+          else
+            post_index_digest=unavailable
+            rm --force "$post_descriptor"
+          fi
+          rm --force "$post_error"
+
+          if [[ -n "${RECONCILIATION_WORK:-}" && -d "$RECONCILIATION_WORK" ]]; then
+            for snapshot in \
+              registry-before-canonical.json \
+              registry-pre-attach-canonical.json \
+              registry-expected-after-canonical.json \
+              registry-after-canonical.json \
+              referrers-index-canonical.json; do
+              if [[ -f "$RECONCILIATION_WORK/$snapshot" ]]; then
+                cp "$RECONCILIATION_WORK/$snapshot" "$evidence/$snapshot"
+              fi
+            done
+          fi
+
+          jq --null-input \
+            --arg image "$IMAGE_NAME@$EXPECTED_DIGEST" \
+            --arg fallbackTag "$REFERRERS_TAG" \
+            --arg action "${RECONCILIATION_ACTION:-not-planned}" \
+            --arg planOutcome "${PLAN_OUTCOME:-unknown}" \
+            --arg attachOutcome "${ATTACH_OUTCOME:-unknown}" \
+            --arg validationOutcome "${VALIDATION_OUTCOME:-unknown}" \
+            --arg preIndexDigest "$pre_index_digest" \
+            --arg attachDigest "$attach_digest" \
+            --arg postIndexDigest "$post_index_digest" \
+            --arg verifiedReferrerDigest "$referrer_digest" '
+              {
+                image: $image,
+                fallbackTag: $fallbackTag,
+                action: $action,
+                outcomes: {
+                  plan: $planOutcome,
+                  attach: $attachOutcome,
+                  validation: $validationOutcome
+                },
+                preIndexDigest: $preIndexDigest,
+                attachDigest: $attachDigest,
+                postIndexDigest: $postIndexDigest,
+                verifiedReferrerDigest: $verifiedReferrerDigest
+              }
+            ' >"$evidence/evidence.json"
+
           {
             printf '## v1.0.0 attestation reconciliation\n\n'
-            printf -- '- Action: `%s`\n' "$RECONCILIATION_ACTION"
+            printf -- '- Action: `%s`\n' "${RECONCILIATION_ACTION:-not-planned}"
             printf -- '- Image index: `%s@%s`\n' "$IMAGE_NAME" "$EXPECTED_DIGEST"
-            printf -- '- Existing GitHub bundle: verified\n'
-            printf -- '- GHCR bundle: `%s` (canonical match, verified)\n' \
-              "$REFERRER_DIGEST"
-            printf -- '- Discovery tags: unchanged\n'
+            printf -- '- Plan / attach / validation: `%s` / `%s` / `%s`\n' \
+              "${PLAN_OUTCOME:-unknown}" \
+              "${ATTACH_OUTCOME:-unknown}" \
+              "${VALIDATION_OUTCOME:-unknown}"
+            printf -- '- Fallback index before / after: `%s` / `%s`\n' \
+              "$pre_index_digest" "$post_index_digest"
+            printf -- '- Attached referrer: `%s`\n' "$attach_digest"
+            printf -- '- Verified GHCR referrer: `%s`\n' "$referrer_digest"
+            printf -- '- Referrer transport: OCI 1.1 tag schema (`%s`)\n' \
+              "$REFERRERS_TAG"
+            if [[ "${VALIDATION_OUTCOME:-unknown}" == success ]]; then
+              printf -- '- Release discovery tags: unchanged and verified\n'
+            else
+              printf -- '- Result: incomplete; use the retained recovery evidence before any retry or rollback\n'
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
+          printf 'complete\n' >"$evidence/collection-status.txt"
 
       - name: Remove registry credentials
         if: always()
@@ -520,3 +861,12 @@ jobs:
             fi
             rm --force "$ORAS_CONFIG"
           fi
+
+      - name: Preserve reconciliation recovery evidence
+        if: always() && steps.record_evidence.outputs.path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reconciliation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.record_evidence.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
