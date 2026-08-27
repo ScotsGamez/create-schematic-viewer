@@ -43,6 +43,7 @@ const elements = {
   showConverterLog: document.querySelector("#showConverterLog"),
   downloadConverted: document.querySelector("#downloadConverted"),
   converterStatus: document.querySelector("#converterStatus"),
+  assetAdminPanel: document.querySelector("#assetAdminPanel"),
   assetPackInput: document.querySelector("#assetPackInput"),
   assetPackLoader: document.querySelector("#assetPackLoader"),
   assetStats: document.querySelector("#assetStats"),
@@ -1234,6 +1235,7 @@ document.addEventListener("schematic-library:open", async (event) => {
 
 document.addEventListener("schematic-library:capabilities", (event) => {
   const canWrite = Boolean(event.detail?.canWrite);
+  elements.assetAdminPanel.toggleAttribute("hidden", !canWrite);
   elements.assetPackInput.disabled = !canWrite;
   elements.assetPackLoader.toggleAttribute("hidden", !canWrite);
 });
