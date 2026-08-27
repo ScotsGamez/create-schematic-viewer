@@ -2,8 +2,14 @@
 
 ## Supported versions
 
-The project has not published a stable release. Security fixes are currently
-made on the default branch and will be included in the next release candidate.
+| Version | Supported |
+| --- | --- |
+| 1.0.x | Yes |
+| Earlier versions | No |
+
+Security fixes are developed on the default branch and released in the next
+available patch version. Deployments should use an immutable container digest
+from a supported release rather than a mutable tag.
 
 ## Report a vulnerability
 

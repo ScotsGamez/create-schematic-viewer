@@ -26,6 +26,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Node.js for PII scanning
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Scan tracked files and commit authors for PII
+        run: npm run check:pii
+
       - name: Run Gitleaks
         run: >-
           docker run --rm
@@ -99,34 +107,6 @@ jobs:
       - name: Build image
         run: docker build --tag create-schematic-viewer:ci .
 
-      - name: Start hardened container
-        run: >-
-          docker run --detach --name schematic-viewer-ci
-          --publish 127.0.0.1:4173:4173
-          --read-only
-          --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m
-          --tmpfs /data:rw,noexec,nosuid,size=128m,uid=1000,gid=1000
-          create-schematic-viewer:ci
-
-      - name: Verify readiness and local browser dependencies
+      - name: Smoke-test hardened container
         shell: bash
-        run: |
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:4173/readyz >/dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              exit 1
-            fi
-            sleep 1
-          done
-          curl --fail --silent http://127.0.0.1:4173/ >/dev/null
-          curl --fail --silent http://127.0.0.1:4173/vendor/three/three.min.js >/dev/null
-
-      - name: Report container logs
-        if: always()
-        run: docker logs schematic-viewer-ci
-
-      - name: Remove container
-        if: always()
-        run: docker rm --force schematic-viewer-ci
+        run: tools/smoke_container.sh create-schematic-viewer:ci schematic-viewer-ci

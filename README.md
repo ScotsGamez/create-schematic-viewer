@@ -69,6 +69,20 @@ docker run --rm --publish 127.0.0.1:4173:4173 --env LIBRARY_WRITE_MODE=local --r
 
 Liveness and readiness probes are available at `/healthz` and `/readyz`.
 
+Stable releases publish a private, non-root image to
+`ghcr.io/scotsgamez/create-schematic-viewer`. Production deployments should
+authenticate with read-only package access and pin the exact digest recorded in
+the release workflow summary:
+
+```shell
+docker pull ghcr.io/scotsgamez/create-schematic-viewer@sha256:<release-digest>
+```
+
+Release tags are provided for discovery, but deployments do not rely on mutable
+tags. Published images include BuildKit provenance, signed registry provenance,
+and an SPDX SBOM. Maintainer instructions and rollback guidance are in
+[Releasing](docs/releasing.md).
+
 ## Typical workflow
 
 1. Start the app and open the local URL.
