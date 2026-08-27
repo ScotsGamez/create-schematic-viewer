@@ -1,0 +1,522 @@
+name: Reconcile v1.0.0 registry attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Attach the existing signed v1.0.0 bundle to GHCR
+        required: true
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: reconcile-v1.0.0-attestation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile the existing v1.0.0 release attestation
+    if: >-
+      github.repository == 'ScotsGamez/create-schematic-viewer' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.confirm == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: attestation-recovery
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/scotsgamez/create-schematic-viewer
+      RELEASE_TAG: v1.0.0
+      SOURCE_COMMIT: f7a4a5b06db10d3974cdea270e4fe92a3721b4b0
+      EXPECTED_DIGEST: sha256:d8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3
+      PLATFORM_DIGEST: sha256:d0553e08cf50e10cd51d774cad84576dd155c6de5de081ef27a10a2ecb450473
+      ATTESTATION_SOURCE_COMMIT: 8ce0edb3c2ddbfed4eb4f0282eaa2e3383471720
+      FAILED_RUN_ID: "33083716510"
+      RELEASE_PREDICATE_TYPE: https://in-toto.io/attestation/release/v0.1
+      BUNDLE_MEDIA_TYPE: application/vnd.dev.sigstore.bundle.v0.3+json
+      EXPECTED_PURL: "pkg:oci/create-schematic-viewer@sha256%3Ad8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3?repository_url=ghcr.io/scotsgamez/create-schematic-viewer&tag=v1.0.0"
+
+    steps:
+      - name: Require independent environment review
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment=$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/attestation-recovery")
+          jq --exit-status '
+            .can_admins_bypass == false and
+            any(
+              .protection_rules[];
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              (.reviewers | length) > 0
+            )
+          ' <<<"$environment" >/dev/null
+
+      - name: Validate the failed recovery run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID")
+          jq --exit-status \
+            --arg source "$ATTESTATION_SOURCE_COMMIT" '
+              .head_sha == $source and
+              .head_branch == "main" and
+              .run_attempt == 1 and
+              .event == "workflow_dispatch" and
+              .conclusion == "failure" and
+              .path == ".github/workflows/recover-v1.0.0-attestation.yml"
+            ' <<<"$run" >/dev/null
+
+          jobs=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1/jobs")
+          jq --exit-status '
+            any(
+              .jobs[].steps[];
+              .name == "Sign the existing image index as the v1.0.0 release" and
+              .conclusion == "failure"
+            )
+          ' <<<"$jobs" >/dev/null
+
+      - name: Check out the reconciliation revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Set up Buildx for provenance inspection
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Prepare isolated anonymous registry access
+        shell: bash
+        run: |
+          anonymous_config="$RUNNER_TEMP/reconciliation-anonymous-docker"
+          mkdir --parents "$anonymous_config"
+          printf 'ANONYMOUS_DOCKER_CONFIG=%s\n' "$anonymous_config" >>"$GITHUB_ENV"
+          printf 'DOCKER_CONFIG=%s\n' "$anonymous_config" >>"$GITHUB_ENV"
+          printf 'ORAS_CONFIG=%s\n' \
+            "$RUNNER_TEMP/attestation-reconciliation/oras/config.json" \
+            >>"$GITHUB_ENV"
+
+      - name: Validate immutable release evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
+          version=$(git show "$RELEASE_TAG:package.json" | \
+            node --input-type=module --eval \
+              'let data=""; process.stdin.on("data", c => data += c); process.stdin.on("end", () => console.log(JSON.parse(data).version));')
+          test "$version" = "${RELEASE_TAG#v}"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" HEAD
+
+          release_json=$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,tagName)
+          jq --exit-status \
+            --arg tag "$RELEASE_TAG" \
+            '.tagName == $tag and (.isDraft | not) and (.isPrerelease | not)' \
+            <<<"$release_json" >/dev/null
+
+          image_ref="$IMAGE_NAME@$EXPECTED_DIGEST"
+          release_manifest=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:$RELEASE_TAG" --format '{{json .Manifest}}')
+          sha_manifest=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:sha-$SOURCE_COMMIT" --format '{{json .Manifest}}')
+          test "$(jq --raw-output '.digest' <<<"$release_manifest")" = "$EXPECTED_DIGEST"
+          test "$(jq --raw-output '.digest' <<<"$sha_manifest")" = "$EXPECTED_DIGEST"
+          jq --exit-status \
+            --arg platform "$PLATFORM_DIGEST" '
+              any(
+                .manifests[];
+                .digest == $platform and
+                .platform.os == "linux" and
+                .platform.architecture == "amd64"
+              ) and
+              any(
+                .manifests[];
+                .annotations["vnd.docker.reference.digest"] == $platform and
+                .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+              )
+            ' <<<"$release_manifest" >/dev/null
+
+          image_metadata=$(docker buildx imagetools inspect \
+            "$image_ref" --format '{{json .Image}}')
+          jq --exit-status \
+            --arg tag "$RELEASE_TAG" \
+            --arg revision "$SOURCE_COMMIT" '
+              .config.Labels["org.opencontainers.image.version"] == $tag and
+              .config.Labels["org.opencontainers.image.revision"] == $revision
+            ' <<<"$image_metadata" >/dev/null
+
+          provenance_path="$RUNNER_TEMP/v1.0.0-buildkit-provenance.json"
+          docker buildx imagetools inspect "$image_ref" \
+            --format '{{json .Provenance.SLSA}}' >"$provenance_path"
+          jq --exit-status \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/33074655267/attempts/1" \
+            --arg revision "$SOURCE_COMMIT" \
+            --arg workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" '
+              .runDetails.builder.id == $run and
+              .buildDefinition.internalParameters.github_repository == env.GITHUB_REPOSITORY and
+              .buildDefinition.internalParameters.github_event_name == "release" and
+              .buildDefinition.internalParameters.github_ref == "refs/tags/v1.0.0" and
+              .buildDefinition.internalParameters.github_workflow_sha == $revision and
+              .buildDefinition.internalParameters.github_workflow_ref == $workflow and
+              .buildDefinition.externalParameters.request.args["label:org.opencontainers.image.revision"] == $revision and
+              .buildDefinition.externalParameters.request.root.request.args["vcs:revision"] == $revision
+            ' "$provenance_path" >/dev/null
+
+      - name: Scan tracked files and commit authors for PII
+        run: npm run check:pii
+
+      - name: Scan complete Git history for secrets
+        shell: bash
+        run: >-
+          docker run --rm
+          --volume "$PWD:/repo"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --no-banner
+
+      - name: Pull anonymously and smoke-test the existing digest
+        shell: bash
+        run: >-
+          tools/smoke_container.sh
+          "$IMAGE_NAME@$EXPECTED_DIGEST"
+          schematic-viewer-reconciliation
+
+      - name: Download and verify the existing GitHub bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/attestation-reconciliation"
+          mkdir --parents "$work"
+          chmod 700 "$work"
+          subject="oci://$IMAGE_NAME@$EXPECTED_DIGEST"
+          signer="github.com/$GITHUB_REPOSITORY/.github/workflows/recover-v1.0.0-attestation.yml"
+
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --method GET \
+            "repos/$GITHUB_REPOSITORY/attestations/$EXPECTED_DIGEST" \
+            -f "predicate_type=$RELEASE_PREDICATE_TYPE" >"$work/github-api.json"
+          jq --exit-status \
+            '.attestations | length == 1' \
+            "$work/github-api.json" >/dev/null
+
+          (
+            cd "$work"
+            gh attestation download "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$RELEASE_PREDICATE_TYPE" \
+              --limit 2
+          )
+          mapfile -d '' bundles < <(
+            find "$work" -maxdepth 1 -name '*.jsonl' -print0
+          )
+          test "${#bundles[@]}" -eq 1
+          bundle="${bundles[0]}"
+
+          gh attestation verify "$subject" --bundle "$bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type "$RELEASE_PREDICATE_TYPE" \
+            --signer-workflow "$signer" \
+            --source-ref refs/heads/main \
+            --source-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --signer-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --deny-self-hosted-runners \
+            --format json >"$work/github-verification.json"
+          jq --exit-status \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1" '
+              length == 1 and
+              .[0].verificationResult.signature.certificate.runInvocationURI == $run
+            ' \
+            "$work/github-verification.json" >/dev/null
+
+          jq --exit-status --slurp \
+            --arg name "$IMAGE_NAME" \
+            --arg digest "${EXPECTED_DIGEST#sha256:}" '
+              length == 1 and
+              .[0].mediaType == env.BUNDLE_MEDIA_TYPE and
+              (.[0].dsseEnvelope.payload | @base64d | fromjson) as $statement |
+              $statement._type == "https://in-toto.io/Statement/v1" and
+              ($statement.subject | length) == 1 and
+              $statement.subject[0].name == $name and
+              $statement.subject[0].digest.sha256 == $digest and
+              $statement.predicateType == env.RELEASE_PREDICATE_TYPE and
+              $statement.predicate.purl == env.EXPECTED_PURL
+            ' "$bundle" >/dev/null
+
+          install --mode=600 "$bundle" "$work/bundle.json"
+          bundle="$work/bundle.json"
+
+          printf 'RECONCILIATION_WORK=%s\n' "$work" >>"$GITHUB_ENV"
+          printf 'GITHUB_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
+
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.3
+
+      - name: Plan registry reconciliation
+        id: registry_plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir --parents "$(dirname "$ORAS_CONFIG")"
+          chmod 700 "$(dirname "$ORAS_CONFIG")"
+          printf '{"auths":{}}\n' >"$ORAS_CONFIG"
+          chmod 600 "$ORAS_CONFIG"
+
+          registry_subject="$IMAGE_NAME@$EXPECTED_DIGEST"
+          before="$RECONCILIATION_WORK/oci-before.json"
+          oras discover \
+            --registry-config "$ORAS_CONFIG" \
+            --distribution-spec v1.1-referrers-api \
+            --artifact-type "$BUNDLE_MEDIA_TYPE" \
+            --format json \
+            "$registry_subject" >"$before"
+
+          release_count=$(jq --raw-output \
+            '(.referrers // []) | length' "$before")
+
+          case "$release_count" in
+            0)
+              action=attach
+              ;;
+            1)
+              referrer_digest=$(jq --raw-output \
+                '.referrers[0].digest' "$before")
+              oras manifest fetch \
+                --registry-config "$ORAS_CONFIG" \
+                "$IMAGE_NAME@$referrer_digest" \
+                >"$RECONCILIATION_WORK/existing-manifest.json"
+              jq --exit-status \
+                --arg bundle_type "$BUNDLE_MEDIA_TYPE" \
+                --arg subject_digest "$EXPECTED_DIGEST" \
+                --arg predicate "$RELEASE_PREDICATE_TYPE" '
+                  .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                  .artifactType == $bundle_type and
+                  .config.mediaType == "application/vnd.oci.empty.v1+json" and
+                  (.layers | length) == 1 and
+                  .layers[0].mediaType == $bundle_type and
+                  .subject.digest == $subject_digest and
+                  .annotations["dev.sigstore.bundle.content"] == "dsse-envelope" and
+                  .annotations["dev.sigstore.bundle.predicateType"] == $predicate
+                ' "$RECONCILIATION_WORK/existing-manifest.json" >/dev/null
+              existing="$RECONCILIATION_WORK/existing"
+              mkdir --parents "$existing"
+              oras pull \
+                --registry-config "$ORAS_CONFIG" \
+                --output "$existing" \
+                "$IMAGE_NAME@$referrer_digest" >/dev/null
+              mapfile -d '' existing_bundles < <(
+                find "$existing" -type f -print0
+              )
+              test "${#existing_bundles[@]}" -eq 1
+              jq --sort-keys --compact-output '.' "$GITHUB_BUNDLE" \
+                >"$RECONCILIATION_WORK/github-canonical.json"
+              jq --sort-keys --compact-output '.' "${existing_bundles[0]}" \
+                >"$RECONCILIATION_WORK/oci-canonical.json"
+              cmp --silent \
+                "$RECONCILIATION_WORK/github-canonical.json" \
+                "$RECONCILIATION_WORK/oci-canonical.json"
+              action=verify-only
+              ;;
+            *)
+              printf 'Refusing reconciliation: found %s matching OCI release bundles.\n' \
+                "$release_count" >&2
+              exit 1
+              ;;
+          esac
+
+          printf 'action=%s\n' "$action" >>"$GITHUB_OUTPUT"
+
+      - name: Authenticate to GHCR for reconciliation
+        if: steps.registry_plan.outputs.action == 'attach'
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | oras login ghcr.io \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin \
+            --registry-config "$ORAS_CONFIG"
+
+      - name: Attach the verified bundle to GHCR
+        if: steps.registry_plan.outputs.action == 'attach'
+        id: reconcile_registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$RECONCILIATION_WORK"
+            oras attach \
+              --registry-config "$ORAS_CONFIG" \
+              --distribution-spec v1.1-referrers-api \
+              --artifact-type "$BUNDLE_MEDIA_TYPE" \
+              --annotation 'dev.sigstore.bundle.content=dsse-envelope' \
+              --annotation "dev.sigstore.bundle.predicateType=$RELEASE_PREDICATE_TYPE" \
+              --format json \
+              "$IMAGE_NAME@$EXPECTED_DIGEST" \
+              "bundle.json:$BUNDLE_MEDIA_TYPE" \
+              >"$RECONCILIATION_WORK/attach.json"
+          )
+
+      - name: Verify the reconciled registry state
+        id: verify_registry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          registry_subject="$IMAGE_NAME@$EXPECTED_DIGEST"
+          signer="github.com/$GITHUB_REPOSITORY/.github/workflows/recover-v1.0.0-attestation.yml"
+          after="$RECONCILIATION_WORK/oci-after.json"
+
+          oras discover \
+            --registry-config "$ORAS_CONFIG" \
+            --distribution-spec v1.1-referrers-api \
+            --artifact-type "$BUNDLE_MEDIA_TYPE" \
+            --format json \
+            "$registry_subject" >"$after"
+
+          release_count_after=$(jq --raw-output \
+            '(.referrers // []) | length' "$after")
+          if [[ "$release_count_after" != 1 ]]; then
+            printf 'Expected one reconciled release bundle, found %s.\n' \
+              "$release_count_after" >&2
+            exit 1
+          fi
+          referrer_digest=$(jq --raw-output '.referrers[0].digest' "$after")
+
+          oras manifest fetch \
+            --registry-config "$ORAS_CONFIG" \
+            "$IMAGE_NAME@$referrer_digest" \
+            >"$RECONCILIATION_WORK/referrer-manifest.json"
+          jq --exit-status \
+            --arg bundle_type "$BUNDLE_MEDIA_TYPE" \
+            --arg subject_digest "$EXPECTED_DIGEST" \
+            --arg predicate "$RELEASE_PREDICATE_TYPE" '
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+              .artifactType == $bundle_type and
+              .config.mediaType == "application/vnd.oci.empty.v1+json" and
+              (.layers | length) == 1 and
+              .layers[0].mediaType == $bundle_type and
+              .subject.digest == $subject_digest and
+              .annotations["dev.sigstore.bundle.content"] == "dsse-envelope" and
+              .annotations["dev.sigstore.bundle.predicateType"] == $predicate
+            ' "$RECONCILIATION_WORK/referrer-manifest.json" >/dev/null
+
+          registry_bundle_dir="$RECONCILIATION_WORK/registry-bundle"
+          mkdir --parents "$registry_bundle_dir"
+          oras pull \
+            --registry-config "$ORAS_CONFIG" \
+            --output "$registry_bundle_dir" \
+            "$IMAGE_NAME@$referrer_digest" >/dev/null
+          mapfile -d '' registry_bundles < <(
+            find "$registry_bundle_dir" -type f -print0
+          )
+          test "${#registry_bundles[@]}" -eq 1
+          jq --sort-keys --compact-output '.' "$GITHUB_BUNDLE" \
+            >"$RECONCILIATION_WORK/github-canonical.json"
+          jq --sort-keys --compact-output '.' "${registry_bundles[0]}" \
+            >"$RECONCILIATION_WORK/registry-canonical.json"
+          cmp --silent \
+            "$RECONCILIATION_WORK/github-canonical.json" \
+            "$RECONCILIATION_WORK/registry-canonical.json"
+
+          subject="oci://$registry_subject"
+          gh attestation verify "$subject" \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type "$RELEASE_PREDICATE_TYPE" \
+            --signer-workflow "$signer" \
+            --source-ref refs/heads/main \
+            --source-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --signer-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --deny-self-hosted-runners \
+            --format json >"$RECONCILIATION_WORK/github-post-verification.json"
+          jq --exit-status \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1" '
+              length == 1 and
+              .[0].verificationResult.signature.certificate.runInvocationURI == $run
+            ' \
+            "$RECONCILIATION_WORK/github-post-verification.json" >/dev/null
+
+          gh attestation verify "$subject" \
+            --bundle-from-oci \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type "$RELEASE_PREDICATE_TYPE" \
+            --signer-workflow "$signer" \
+            --source-ref refs/heads/main \
+            --source-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --signer-digest "$ATTESTATION_SOURCE_COMMIT" \
+            --deny-self-hosted-runners \
+            --format json >"$RECONCILIATION_WORK/oci-verification.json"
+          jq --exit-status \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/attempts/1" '
+              length == 1 and
+              .[0].verificationResult.signature.certificate.runInvocationURI == $run
+            ' \
+            "$RECONCILIATION_WORK/oci-verification.json" >/dev/null
+
+          release_digest_after=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:$RELEASE_TAG" --format '{{json .Manifest}}' | \
+            jq --raw-output '.digest')
+          sha_digest_after=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:sha-$SOURCE_COMMIT" --format '{{json .Manifest}}' | \
+            jq --raw-output '.digest')
+          test "$release_digest_after" = "$EXPECTED_DIGEST"
+          test "$sha_digest_after" = "$EXPECTED_DIGEST"
+
+          printf 'referrer_digest=%s\n' "$referrer_digest" >>"$GITHUB_OUTPUT"
+
+      - name: Record reconciliation evidence
+        shell: bash
+        env:
+          RECONCILIATION_ACTION: ${{ steps.registry_plan.outputs.action }}
+          REFERRER_DIGEST: ${{ steps.verify_registry.outputs.referrer_digest }}
+        run: |
+          set -euo pipefail
+          {
+            printf '## v1.0.0 attestation reconciliation\n\n'
+            printf -- '- Action: `%s`\n' "$RECONCILIATION_ACTION"
+            printf -- '- Image index: `%s@%s`\n' "$IMAGE_NAME" "$EXPECTED_DIGEST"
+            printf -- '- Existing GitHub bundle: verified\n'
+            printf -- '- GHCR bundle: `%s` (canonical match, verified)\n' \
+              "$REFERRER_DIGEST"
+            printf -- '- Discovery tags: unchanged\n'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove registry credentials
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          if [[ -n "${ORAS_CONFIG:-}" && -f "$ORAS_CONFIG" ]]; then
+            if command -v oras >/dev/null 2>&1; then
+              oras logout ghcr.io \
+                --registry-config "$ORAS_CONFIG" >/dev/null 2>&1 || true
+            fi
+            rm --force "$ORAS_CONFIG"
+          fi

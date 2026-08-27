@@ -71,6 +71,22 @@ the duplicate preflight rather than creating another signature. Preserve the
 failed run as evidence, verify GitHub and GHCR separately, and use a separately
 reviewed reconciliation change to attach the existing signed bundle to GHCR.
 
+Run `33083716510` reached that split state: it persisted exactly one valid
+release attestation in GitHub, then failed because the signing action could not
+find the GHCR credential written to an isolated Docker configuration. The image
+index and both discovery tags remained unchanged, and GHCR had no release-bundle
+referrer. The protected, manually dispatched
+`.github/workflows/reconcile-v1.0.0-attestation.yml` workflow repairs only that
+registry attachment. It downloads the existing GitHub bundle, verifies its
+signature, workflow identity, source revision, fixed subject, predicate, and
+purl, then attaches those exact signed bytes to the immutable image digest. It
+does not sign, create another GitHub attestation, publish an image, or move a
+tag. An absent matching GHCR bundle is attached; one canonically identical
+bundle is verification-only; duplicates, mismatches, and indeterminate states
+fail closed. The workflow finishes by verifying the same attestation through
+both GitHub and GHCR and confirming both discovery tags still resolve to the
+original index digest.
+
 The recovery job targets the protected `attestation-recovery` environment. That
 environment must require at least one reviewer, prevent self-review, and disable
 administrator bypass; the job also checks those rules and fails closed before
