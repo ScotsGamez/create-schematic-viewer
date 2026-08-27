@@ -52,14 +52,24 @@ manually dispatched recovery.
 
 The recovery is hard-coded to the original release tag, source commit, workflow
 run, and image digest. It verifies both discovery tags and the image labels,
-extracts and validates the original BuildKit SLSA predicate, repeats the PII and
-full-history secret scans, and anonymously smoke-tests the image before signing.
-It signs the original SLSA predicate only for its actual Linux platform-manifest
-subject. It separately signs the unchanged image-index digest with the standard
-in-toto release predicate used by LANtern's deployment coordinate. It cannot
-accept a different subject, build an image, retag, or alter the subject image or
-index manifest. After signing, it verifies both attestations through GitHub and
-GHCR and confirms the tag digests remain unchanged.
+validates the original in-index BuildKit SLSA provenance, repeats the PII and
+full-history secret scans, and anonymously smoke-tests the image. It does not
+re-sign that historical build provenance or claim that the recovery workflow
+built `v1.0.0`. It creates one signed in-toto attestation using the
+`https://in-toto.io/attestation/release/v0.1` predicate. Its subject is the
+unchanged image-index digest, and its OCI purl binds `v1.0.0` to the GHCR package.
+Before signing, it proceeds only when the GitHub API confirms repository access
+and explicitly reports no existing release attestation for that fixed subject.
+An existing record or indeterminate response fails closed. The recovery cannot
+accept a different subject, build an image, retag, or alter the image or index.
+After signing, it verifies the release attestation through GitHub and GHCR and
+confirms both tag digests remain unchanged.
+
+The signing action persists the GitHub attestation before uploading its bundle
+to GHCR. If a run fails between those operations, a rerun intentionally stops at
+the duplicate preflight rather than creating another signature. Preserve the
+failed run as evidence, verify GitHub and GHCR separately, and use a separately
+reviewed reconciliation change to attach the existing signed bundle to GHCR.
 
 The recovery job targets the protected `attestation-recovery` environment. That
 environment must require at least one reviewer, prevent self-review, and disable
