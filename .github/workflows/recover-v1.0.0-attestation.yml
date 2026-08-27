@@ -194,23 +194,61 @@ jobs:
           jq --null-input --arg purl "$purl" \
             '{purl: $purl}' >"$RUNNER_TEMP/v1.0.0-release-predicate.json"
 
+      - name: Refuse existing or indeterminate release attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repository_response="$RUNNER_TEMP/repository-access-preflight.json"
+          repository_status=$(curl \
+            --silent \
+            --show-error \
+            --output "$repository_response" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY")
+          if [ "$repository_status" != 200 ]; then
+            printf 'Refusing recovery: repository identity check returned HTTP %s.\n' \
+              "$repository_status" >&2
+            exit 1
+          fi
+          jq --exit-status \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '.full_name == $repository' \
+            "$repository_response" >/dev/null
+
+          response="$RUNNER_TEMP/release-attestation-preflight.json"
+          http_status=$(curl \
+            --silent \
+            --show-error \
+            --output "$response" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --get \
+            --data-urlencode "predicate_type=$RELEASE_PREDICATE_TYPE" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/attestations/$EXPECTED_DIGEST")
+
+          case "$http_status" in
+            404)
+              ;;
+            *)
+              printf 'Refusing recovery: expected GitHub to report no existing release attestation (404), received HTTP %s.\n' \
+                "$http_status" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Authenticate to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Sign the validated platform build provenance
-        id: attest_provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ env.PLATFORM_DIGEST }}
-          predicate-type: https://slsa.dev/provenance/v1
-          predicate-path: ${{ runner.temp }}/v1.0.0-buildkit-provenance.json
-          push-to-registry: true
-          create-storage-record: false
 
       - name: Sign the existing image index as the v1.0.0 release
         id: attest_release
@@ -223,12 +261,11 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      - name: Verify the signed provenance through GitHub and GHCR
+      - name: Verify the release attestation through GitHub and GHCR
         shell: bash
         run: |
           set -euo pipefail
           signer="github.com/$GITHUB_REPOSITORY/.github/workflows/recover-v1.0.0-attestation.yml"
-          platform="oci://$IMAGE_NAME@$PLATFORM_DIGEST"
           release="oci://$IMAGE_NAME@$EXPECTED_DIGEST"
 
           for source in github oci; do
@@ -237,15 +274,6 @@ jobs:
               registry_flag=(--bundle-from-oci)
             fi
 
-            gh attestation verify "$platform" \
-              --repo "$GITHUB_REPOSITORY" \
-              --predicate-type https://slsa.dev/provenance/v1 \
-              --signer-workflow "$signer" \
-              --source-ref refs/heads/main \
-              --source-digest "$GITHUB_SHA" \
-              --signer-digest "$GITHUB_SHA" \
-              --deny-self-hosted-runners \
-              "${registry_flag[@]}"
             gh attestation verify "$release" \
               --repo "$GITHUB_REPOSITORY" \
               --predicate-type "$RELEASE_PREDICATE_TYPE" \
@@ -272,11 +300,10 @@ jobs:
       - name: Record recovery evidence
         shell: bash
         env:
-          PROVENANCE_ATTESTATION_URL: ${{ steps.attest_provenance.outputs.attestation-url }}
           RELEASE_ATTESTATION_URL: ${{ steps.attest_release.outputs.attestation-url }}
         run: |
-          printf '### Recovered v1.0.0 attestations\n\n' >>"$GITHUB_STEP_SUMMARY"
+          printf '### Validated v1.0.0 provenance and release attestation\n\n' >>"$GITHUB_STEP_SUMMARY"
           printf -- '- Image: `%s@%s`\n' "$IMAGE_NAME" "$EXPECTED_DIGEST" >>"$GITHUB_STEP_SUMMARY"
           printf -- '- Original build: %s\n' "$ORIGINAL_RUN_URL" >>"$GITHUB_STEP_SUMMARY"
-          printf -- '- Platform provenance: %s\n' "$PROVENANCE_ATTESTATION_URL" >>"$GITHUB_STEP_SUMMARY"
+          printf -- '- Original BuildKit provenance: validated in the OCI image index\n' >>"$GITHUB_STEP_SUMMARY"
           printf -- '- Release attestation: %s\n' "$RELEASE_ATTESTATION_URL" >>"$GITHUB_STEP_SUMMARY"

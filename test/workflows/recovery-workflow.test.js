@@ -59,7 +59,62 @@ test("recovery cannot rebuild, republish, or move release tags", async () => {
   assert.match(workflow, /test .*EXPECTED_DIGEST/);
 });
 
-test("recovery validates and signs original provenance after security checks", async () => {
+test("recovery publishes exactly one release attestation for the immutable image index", async () => {
+  const workflow = await recoveryWorkflow();
+  const attestInvocations = workflow.match(/uses:\s+actions\/attest@/g) ?? [];
+
+  assert.equal(attestInvocations.length, 1);
+  assert.match(workflow, /Sign the existing image index as the v1\.0\.0 release/);
+  assert.match(workflow, /subject-digest: \$\{\{ env\.EXPECTED_DIGEST \}\}/);
+  assert.match(workflow, /predicate-type: \$\{\{ env\.RELEASE_PREDICATE_TYPE \}\}/);
+  assert.doesNotMatch(workflow, /Sign the validated platform build provenance/);
+});
+
+test("recovery refuses an existing or indeterminate release attestation before signing", async () => {
+  const workflow = await recoveryWorkflow();
+  const duplicateCheck = workflow.indexOf(
+    "Refuse existing or indeterminate release attestation",
+  );
+  const login = workflow.indexOf("docker/login-action@");
+  const signing = workflow.indexOf("actions/attest@");
+
+  assert.ok(duplicateCheck >= 0);
+  assert.ok(duplicateCheck < login && duplicateCheck < signing);
+  assert.match(
+    workflow,
+    /repos\/\$GITHUB_REPOSITORY\/attestations\/\$EXPECTED_DIGEST/,
+  );
+  assert.match(
+    workflow,
+    /--data-urlencode "predicate_type=\$RELEASE_PREDICATE_TYPE"/,
+  );
+  assert.match(workflow, /case "\$http_status" in\s+404\)\s+;;/s);
+  assert.match(workflow, /\*\)\s+printf[\s\S]+?exit 1/s);
+  assert.doesNotMatch(workflow, /\|\| true/);
+  assert.equal(
+    (workflow.match(/X-GitHub-Api-Version: 2026-03-10/g) ?? []).length,
+    2,
+  );
+  assert.doesNotMatch(workflow, /X-GitHub-Api-Version: 2022-11-28/);
+});
+
+test("duplicate preflight proves repository access before accepting absence", async () => {
+  const workflow = await recoveryWorkflow();
+  const repositoryCheck = workflow.indexOf(
+    '"https://api.github.com/repos/$GITHUB_REPOSITORY"',
+  );
+  const attestationCheck = workflow.indexOf(
+    '"https://api.github.com/repos/$GITHUB_REPOSITORY/attestations/$EXPECTED_DIGEST"',
+  );
+
+  assert.ok(repositoryCheck >= 0);
+  assert.ok(repositoryCheck < attestationCheck);
+  assert.match(workflow, /repository_status.*%\{http_code\}/s);
+  assert.match(workflow, /"\$repository_status" != 200/);
+  assert.match(workflow, /\.full_name == \$repository/);
+});
+
+test("recovery validates original provenance and signs the release after security checks", async () => {
   const workflow = await recoveryWorkflow();
   const provenance = workflow.indexOf("Validate immutable tags, labels, and original provenance");
   const pii = workflow.indexOf("npm run check:pii");
@@ -77,8 +132,8 @@ test("recovery validates and signs original provenance after security checks", a
   assert.match(workflow, /required_reviewers/);
   assert.match(workflow, /Provenance\.SLSA/);
   assert.match(workflow, /github_run_id ==|runDetails\.builder\.id ==/);
-  assert.match(workflow, /subject-digest: \$\{\{ env\.PLATFORM_DIGEST \}\}/);
-  assert.match(workflow, /predicate-type: https:\/\/slsa\.dev\/provenance\/v1/);
+  assert.doesNotMatch(workflow, /subject-digest: \$\{\{ env\.PLATFORM_DIGEST \}\}/);
+  assert.doesNotMatch(workflow, /predicate-type: https:\/\/slsa\.dev\/provenance\/v1/);
   assert.match(workflow, /subject-digest: \$\{\{ env\.EXPECTED_DIGEST \}\}/);
   assert.match(workflow, /https:\/\/in-toto\.io\/attestation\/release\/v0\.1/);
   assert.match(workflow, /create-storage-record: false/);
