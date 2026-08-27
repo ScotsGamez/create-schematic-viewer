@@ -9,6 +9,7 @@ LABEL org.opencontainers.image.title="Create Schematic Viewer" \
       org.opencontainers.image.licenses="MIT"
 
 ENV HOST=0.0.0.0 \
+    DATA_DIR=/data \
     NODE_ENV=production \
     PORT=4173 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -35,9 +36,10 @@ COPY src ./src
 COPY converter/litematic_converter ./converter/litematic_converter
 COPY converter/litematic_to_nbt.py ./converter/litematic_to_nbt.py
 COPY tools/apply_replacements.py ./tools/apply_replacements.py
+COPY tools/library_data.js ./tools/library_data.js
 
-RUN mkdir -p /app/.tmp/conversions \
-    && chown -R node:node /app/.tmp
+RUN mkdir -p /app/.tmp/conversions /data \
+    && chown -R node:node /app/.tmp /data
 
 USER node
 EXPOSE 4173

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assetSummary, getTexture, loadAssetPack, resolveBlockModel, resolveBlockTextures } from "./src/asset-pack.js";
+import { createLibraryApi } from "./src/server/library-api.js";
 import { parseUploadedSchematic, validateSchematicZip } from "./src/server/schematic-upload.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -13,6 +14,7 @@ const converterDir = join(root, "converter");
 const converterScript = join(converterDir, "litematic_to_nbt.py");
 const replacementScript = join(root, "tools", "apply_replacements.py");
 const conversionTmpDir = join(root, ".tmp", "conversions");
+const defaultDataDir = join(root, ".data");
 const port = Number(process.env.PORT || 4173);
 const host = String(process.env.HOST || "127.0.0.1");
 const maxUploadBytes = 80 * 1024 * 1024;
@@ -78,9 +80,12 @@ function writeLog(level, event, fields = {}) {
   console.log(line);
 }
 
-async function isReady() {
+async function isReady(storageReadiness) {
   try {
-    await Promise.all(readinessFiles.map((filePath) => stat(filePath)));
+    await Promise.all([
+      storageReadiness(),
+      ...readinessFiles.map((filePath) => stat(filePath))
+    ]);
     return true;
   } catch {
     return false;
@@ -369,7 +374,22 @@ function spawnConverter(command, args, cwd) {
   });
 }
 
-export function createAppServer() {
+/** @param {{dataDir?: string, libraryWriteEnabled?: boolean}} [options] */
+export function createAppServer({
+  dataDir = process.env.DATA_DIR || defaultDataDir,
+  libraryWriteEnabled = process.env.LIBRARY_WRITE_ENABLED === "true"
+} = {}) {
+  const libraryApi = createLibraryApi({
+    dataDir,
+    writeEnabled: libraryWriteEnabled,
+    maxUploadBytes: maxAssetPackBytes,
+    parseSchematic: parseUploadedSchematic,
+    loadAssetPack
+  });
+  libraryApi.initialization.catch((error) => writeLog("error", "library_initialization_failed", {
+    message: String(error?.message || error).slice(0, 1000)
+  }));
+
   return http.createServer(async (request, response) => {
     try {
       const url = route(request);
@@ -384,7 +404,7 @@ export function createAppServer() {
       }
 
       if (request.method === "GET" && url.pathname === "/readyz") {
-        const ready = await isReady();
+        const ready = await isReady(libraryApi.checkReadiness);
         sendJson(response, ready ? 200 : 503, { status: ready ? "ready" : "unavailable" });
         return;
       }
@@ -393,15 +413,21 @@ export function createAppServer() {
         return;
       }
 
+      if (await libraryApi.handle(request, response, url)) {
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/assets")) {
+        await libraryApi.initialization;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/assets") {
         sendJson(response, 200, assetSummary());
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/assets/upload") {
-        const body = await readLargeRequestBody(request, maxAssetPackBytes);
-        const summary = loadAssetPack(body, request.headers["x-file-name"] || "asset-pack.jar");
-        sendJson(response, 200, summary);
+        await libraryApi.importAsset(request, response);
         return;
       }
 
@@ -479,16 +505,17 @@ export function createAppServer() {
         return;
       }
 
-      response.writeHead(405, { "allow": "GET, POST" });
+      response.writeHead(405, { "allow": "GET, POST, DELETE" });
       response.end("Method not allowed");
     } catch (error) {
       const message = String(error?.message || "Unable to process request.").slice(0, 1000);
+      const status = Number.isInteger(error?.statusCode) ? error.statusCode : 400;
       writeLog("error", "request_failed", {
         method: request.method,
-        status: 400,
+        status,
         message
       });
-      sendJson(response, 400, {
+      sendJson(response, status, {
         error: message,
         stack: process.env.NODE_ENV === "development" ? error.stack : undefined
       });

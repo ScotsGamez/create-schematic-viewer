@@ -105,6 +105,7 @@ jobs:
           --publish 127.0.0.1:4173:4173
           --read-only
           --tmpfs /app/.tmp:rw,noexec,nosuid,size=512m
+          --tmpfs /data:rw,noexec,nosuid,size=128m,uid=1000,gid=1000
           create-schematic-viewer:ci
 
       - name: Verify readiness and local browser dependencies

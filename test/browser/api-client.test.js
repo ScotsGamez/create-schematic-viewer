@@ -3,6 +3,23 @@ import test from "node:test";
 
 import { createApiClient, decodeHeaderLog } from "../../public/js/api-client.js";
 
+test("asset imports use the versioned persistent-library endpoint", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "/schematics/api",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ textures: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+
+  await client.loadAssetPack({ fileName: "create.jar", bytes: Uint8Array.of(1) });
+  assert.equal(calls[0].url, "/schematics/api/v1/library/assets");
+});
+
 test("parseSchematic posts binary data to the configured API base", async () => {
   const calls = [];
   const client = createApiClient({

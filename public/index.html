@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Create Schematic Viewer</title>
     <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./style.css">
   </head>
   <body>
     <div class="app-shell">
@@ -22,6 +23,28 @@
           <span class="drop-title">Open schematic</span>
           <span class="drop-copy">Drop a `.nbt`, `.schem`, or `.schematic` file here or choose one from disk.</span>
         </label>
+
+        <section class="panel library-panel" id="schematicLibrary" aria-labelledby="libraryHeading">
+          <div class="library-heading-row">
+            <div>
+              <h2 id="libraryHeading">Schematic library</h2>
+              <p>Browse reusable builds shared with this viewer.</p>
+            </div>
+            <span class="library-summary" id="libraryStatus" role="status" aria-live="polite">Loading…</span>
+          </div>
+          <label class="library-search">
+            <span class="visually-hidden">Search shared schematics</span>
+            <input id="librarySearch" type="search" placeholder="Search schematics" autocomplete="off">
+          </label>
+          <label class="check library-trash-toggle">
+            <input id="libraryIncludeTrashed" type="checkbox">
+            <span>Show trash</span>
+          </label>
+          <button id="libraryAddCurrent" class="library-add" type="button" hidden>Add current schematic</button>
+          <div class="library-list" id="libraryList" role="list" aria-busy="true">
+            <div class="library-state">Loading shared schematics…</div>
+          </div>
+        </section>
 
         <section class="panel converter-panel">
           <h2>Litematic Converter</h2>
@@ -51,7 +74,7 @@
 
         <section class="panel admin-panel">
           <h2>Asset Admin</h2>
-          <label class="asset-loader">
+          <label class="asset-loader" id="assetPackLoader" hidden>
             <input id="assetPackInput" type="file" accept=".jar,.zip,application/java-archive,application/zip" multiple>
             <span>Load mods/resource packs</span>
           </label>

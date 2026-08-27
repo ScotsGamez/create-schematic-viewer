@@ -1,4 +1,5 @@
 import { createApiClient } from "./js/api-client.js";
+import { createLibraryClient } from "./js/library-client.js";
 import {
   blockShape,
   isOpaqueFullCube,
@@ -30,6 +31,7 @@ import {
 } from "./js/replacements.js";
 
 const api = createApiClient();
+const libraryApi = createLibraryClient();
 
 const elements = {
   fileInput: document.querySelector("#fileInput"),
@@ -42,6 +44,7 @@ const elements = {
   downloadConverted: document.querySelector("#downloadConverted"),
   converterStatus: document.querySelector("#converterStatus"),
   assetPackInput: document.querySelector("#assetPackInput"),
+  assetPackLoader: document.querySelector("#assetPackLoader"),
   assetStats: document.querySelector("#assetStats"),
   assetPackList: document.querySelector("#assetPackList"),
   dropZone: document.querySelector("#dropZone"),
@@ -193,6 +196,32 @@ async function loadAssetPack(file) {
     renderSchematic();
     updatePaletteList();
   }
+}
+
+function setLibraryStatus(message, kind) {
+  const status = document.querySelector("#libraryStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+async function addCurrentSchematicToLibrary() {
+  if (!state.sourceBytes || !state.schematic || !state.currentFileName) {
+    throw new Error("Load a schematic before adding it to the shared library.");
+  }
+  if (!state.currentFileName.toLowerCase().endsWith(".nbt")) {
+    throw new Error("Convert this schematic to .nbt before adding it to the shared library.");
+  }
+
+  const title = baseFileName(state.currentFileName).replace(/[_-]+/g, " ").trim() || "Untitled schematic";
+  return libraryApi.importSchematic({
+    bytes: state.sourceBytes,
+    fileName: state.currentFileName,
+    title,
+    metadata: {
+      tags: state.schematic.palette.some((entry) => String(entry.name || "").startsWith("create:")) ? ["create"] : []
+    }
+  });
 }
 
 async function convertLitematicFile(file) {
@@ -1171,6 +1200,34 @@ elements.fileInput.addEventListener("change", async () => {
     elements.viewerTitle.textContent = "Could not load schematic";
     elements.viewerSubtitle.textContent = error.message;
   }
+});
+
+document.addEventListener("schematic-library:add-current", async () => {
+  setLibraryStatus("Adding current schematic…", "loading");
+  try {
+    const item = await addCurrentSchematicToLibrary();
+    setLibraryStatus(`Added ${item.title}.`, "success");
+    document.dispatchEvent(new CustomEvent("schematic-library:refresh"));
+  } catch (error) {
+    setLibraryStatus(error instanceof Error ? error.message : String(error), "error");
+  }
+});
+
+document.addEventListener("schematic-library:open", async (event) => {
+  const file = event.detail?.file;
+  if (!file) return;
+  try {
+    await loadFile(file);
+  } catch (error) {
+    elements.viewerTitle.textContent = "Could not load schematic";
+    elements.viewerSubtitle.textContent = error instanceof Error ? error.message : String(error);
+  }
+});
+
+document.addEventListener("schematic-library:capabilities", (event) => {
+  const canWrite = Boolean(event.detail?.canWrite);
+  elements.assetPackInput.disabled = !canWrite;
+  elements.assetPackLoader.toggleAttribute("hidden", !canWrite);
 });
 
 elements.litematicInput.addEventListener("change", () => {
