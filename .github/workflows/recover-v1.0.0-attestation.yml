@@ -1,0 +1,282 @@
+name: Recover v1.0.0 attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Attest the fixed v1.0.0 digest
+        required: true
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: recover-v1.0.0-attestation
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Attest and verify existing v1.0.0 image
+    if: >-
+      github.repository == 'ScotsGamez/create-schematic-viewer' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.confirm == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: attestation-recovery
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE_NAME: ghcr.io/scotsgamez/create-schematic-viewer
+      RELEASE_TAG: v1.0.0
+      SOURCE_COMMIT: f7a4a5b06db10d3974cdea270e4fe92a3721b4b0
+      EXPECTED_DIGEST: sha256:d8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3
+      PLATFORM_DIGEST: sha256:d0553e08cf50e10cd51d774cad84576dd155c6de5de081ef27a10a2ecb450473
+      ORIGINAL_RUN_URL: https://github.com/ScotsGamez/create-schematic-viewer/actions/runs/33074655267/attempts/1
+      RELEASE_PREDICATE_TYPE: https://in-toto.io/attestation/release/v0.1
+
+    steps:
+      - name: Require independent environment review
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment=$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/attestation-recovery")
+          jq --exit-status '
+            .can_admins_bypass == false and
+            any(
+              .protection_rules[];
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              (.reviewers | length) > 0
+            )
+          ' <<<"$environment" >/dev/null
+
+      - name: Check out the released revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Set up Buildx for provenance inspection
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Validate release source and package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(node --print "require('./package.json').version")" = "${RELEASE_TAG#v}"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
+
+          release_json=$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,tagName)
+          jq --exit-status \
+            --arg tag "$RELEASE_TAG" \
+            '.tagName == $tag and (.isDraft | not) and (.isPrerelease | not)' \
+            <<<"$release_json" >/dev/null
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Prepare isolated anonymous registry access
+        shell: bash
+        run: |
+          docker_config="$RUNNER_TEMP/recovery-docker-config"
+          mkdir --parents "$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
+
+      - name: Validate immutable tags, labels, and original provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_NAME@$EXPECTED_DIGEST"
+
+          release_manifest=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:$RELEASE_TAG" --format '{{json .Manifest}}')
+          sha_manifest=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME:sha-$SOURCE_COMMIT" --format '{{json .Manifest}}')
+          test "$(jq --raw-output '.digest' <<<"$release_manifest")" = "$EXPECTED_DIGEST"
+          test "$(jq --raw-output '.digest' <<<"$sha_manifest")" = "$EXPECTED_DIGEST"
+          jq --exit-status \
+            --arg platform "$PLATFORM_DIGEST" \
+            'any(
+               .manifests[];
+               .digest == $platform and
+               .platform.os == "linux" and
+               .platform.architecture == "amd64"
+             ) and
+             any(
+               .manifests[];
+               .annotations["vnd.docker.reference.digest"] == $platform and
+               .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+             )' <<<"$release_manifest" >/dev/null
+
+          attestation_digest=$(jq --raw-output \
+            --arg platform "$PLATFORM_DIGEST" \
+            '.manifests[] |
+             select(.annotations["vnd.docker.reference.digest"] == $platform) |
+             .digest' <<<"$release_manifest")
+          attestation_manifest=$(docker buildx imagetools inspect \
+            "$IMAGE_NAME@$attestation_digest" --raw)
+          jq --exit-status \
+            --arg platform "$PLATFORM_DIGEST" \
+            '.subject.digest == $platform and
+             .subject.mediaType == "application/vnd.oci.image.manifest.v1+json" and
+             any(
+               .layers[];
+               .annotations["in-toto.io/predicate-type"] == "https://slsa.dev/provenance/v1"
+             )' <<<"$attestation_manifest" >/dev/null
+
+          image_metadata=$(docker buildx imagetools inspect \
+            "$image_ref" --format '{{json .Image}}')
+          jq --exit-status \
+            --arg tag "$RELEASE_TAG" \
+            --arg revision "$SOURCE_COMMIT" \
+            '.config.Labels["org.opencontainers.image.version"] == $tag and
+             .config.Labels["org.opencontainers.image.revision"] == $revision' \
+            <<<"$image_metadata" >/dev/null
+
+          provenance_path="$RUNNER_TEMP/v1.0.0-buildkit-provenance.json"
+          docker buildx imagetools inspect "$image_ref" \
+            --format '{{json .Provenance.SLSA}}' >"$provenance_path"
+          jq --exit-status \
+            --arg run "$ORIGINAL_RUN_URL" \
+            --arg revision "$SOURCE_COMMIT" \
+            --arg workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" \
+            '.runDetails.builder.id == $run and
+             .buildDefinition.internalParameters.github_repository == env.GITHUB_REPOSITORY and
+             .buildDefinition.internalParameters.github_event_name == "release" and
+             .buildDefinition.internalParameters.github_ref == "refs/tags/v1.0.0" and
+             .buildDefinition.internalParameters.github_run_id == "33074655267" and
+             .buildDefinition.internalParameters.github_run_attempt == "1" and
+             .buildDefinition.internalParameters.github_workflow_sha == $revision and
+             .buildDefinition.internalParameters.github_workflow_ref == $workflow and
+             .buildDefinition.externalParameters.request.args["label:org.opencontainers.image.revision"] == $revision and
+             .buildDefinition.externalParameters.request.root.request.args["vcs:revision"] == $revision' \
+            "$provenance_path" >/dev/null
+
+      - name: Scan tracked files and commit authors for PII
+        run: npm run check:pii
+
+      - name: Scan complete Git history for secrets
+        shell: bash
+        run: >-
+          docker run --rm
+          --volume "$PWD:/repo"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --no-banner
+
+      - name: Pull anonymously and smoke-test the existing digest
+        shell: bash
+        run: >-
+          tools/smoke_container.sh
+          "$IMAGE_NAME@$EXPECTED_DIGEST"
+          schematic-viewer-recovery
+
+      - name: Prepare the standard release predicate
+        shell: bash
+        run: |
+          purl="pkg:oci/create-schematic-viewer@${EXPECTED_DIGEST/:/%3A}?repository_url=ghcr.io/scotsgamez/create-schematic-viewer&tag=$RELEASE_TAG"
+          jq --null-input --arg purl "$purl" \
+            '{purl: $purl}' >"$RUNNER_TEMP/v1.0.0-release-predicate.json"
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign the validated platform build provenance
+        id: attest_provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ env.PLATFORM_DIGEST }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ runner.temp }}/v1.0.0-buildkit-provenance.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Sign the existing image index as the v1.0.0 release
+        id: attest_release
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ env.EXPECTED_DIGEST }}
+          predicate-type: ${{ env.RELEASE_PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/v1.0.0-release-predicate.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify the signed provenance through GitHub and GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          signer="github.com/$GITHUB_REPOSITORY/.github/workflows/recover-v1.0.0-attestation.yml"
+          platform="oci://$IMAGE_NAME@$PLATFORM_DIGEST"
+          release="oci://$IMAGE_NAME@$EXPECTED_DIGEST"
+
+          for source in github oci; do
+            registry_flag=()
+            if [ "$source" = oci ]; then
+              registry_flag=(--bundle-from-oci)
+            fi
+
+            gh attestation verify "$platform" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow "$signer" \
+              --source-ref refs/heads/main \
+              --source-digest "$GITHUB_SHA" \
+              --signer-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners \
+              "${registry_flag[@]}"
+            gh attestation verify "$release" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$RELEASE_PREDICATE_TYPE" \
+              --signer-workflow "$signer" \
+              --source-ref refs/heads/main \
+              --source-digest "$GITHUB_SHA" \
+              --signer-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners \
+              "${registry_flag[@]}"
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Confirm tags were not moved
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in "$RELEASE_TAG" "sha-$SOURCE_COMMIT"; do
+            manifest=$(docker buildx imagetools inspect \
+              "$IMAGE_NAME:$tag" --format '{{json .Manifest}}')
+            test "$(jq --raw-output '.digest' <<<"$manifest")" = "$EXPECTED_DIGEST"
+          done
+
+      - name: Record recovery evidence
+        shell: bash
+        env:
+          PROVENANCE_ATTESTATION_URL: ${{ steps.attest_provenance.outputs.attestation-url }}
+          RELEASE_ATTESTATION_URL: ${{ steps.attest_release.outputs.attestation-url }}
+        run: |
+          printf '### Recovered v1.0.0 attestations\n\n' >>"$GITHUB_STEP_SUMMARY"
+          printf -- '- Image: `%s@%s`\n' "$IMAGE_NAME" "$EXPECTED_DIGEST" >>"$GITHUB_STEP_SUMMARY"
+          printf -- '- Original build: %s\n' "$ORIGINAL_RUN_URL" >>"$GITHUB_STEP_SUMMARY"
+          printf -- '- Platform provenance: %s\n' "$PROVENANCE_ATTESTATION_URL" >>"$GITHUB_STEP_SUMMARY"
+          printf -- '- Release attestation: %s\n' "$RELEASE_ATTESTATION_URL" >>"$GITHUB_STEP_SUMMARY"
