@@ -80,12 +80,53 @@ referrer. The protected, manually dispatched
 registry attachment. It downloads the existing GitHub bundle, verifies its
 signature, workflow identity, source revision, fixed subject, predicate, and
 purl, then attaches those exact signed bytes to the immutable image digest. It
-does not sign, create another GitHub attestation, publish an image, or move a
-tag. An absent matching GHCR bundle is attached; one canonically identical
-bundle is verification-only; duplicates, mismatches, and indeterminate states
-fail closed. The workflow finishes by verifying the same attestation through
-both GitHub and GHCR and confirming both discovery tags still resolve to the
-original index digest.
+does not sign, create another GitHub attestation, publish an image, or move
+either release discovery tag. An absent matching GHCR bundle is attached; one
+canonically identical bundle is verification-only; duplicates, mismatches, and
+indeterminate states fail closed. The workflow finishes by verifying the same
+attestation through both GitHub and GHCR and confirming both release discovery
+tags still resolve to the original index digest.
+
+Run `33086554931` failed safely during its anonymous registry-state plan because
+GHCR rejected the forced OCI Referrers API. Registry authentication and bundle
+attachment were skipped, credential cleanup succeeded, and the package remained
+unchanged. GHCR does support the OCI 1.1 referrers-tag compatibility scheme, so
+reconciliation explicitly uses that same transport for planning, attachment,
+and post-verification. This creates or updates only the digest-derived metadata
+index tag
+`sha256-d8dcef565e7da6c7536b591cc9cbe0471637364ffc22ae40590cd2c0910484a3`;
+it does not alter `v1.0.0`, the full source-commit tag, the existing subject
+index, or any existing platform image manifest. Attachment creates one new
+attestation wrapper manifest referenced by the digest-derived metadata index.
+
+The fallback metadata tag is mutable and its registry update is not atomic.
+Before dispatch, the operator must confirm no other client is writing this GHCR
+package. The workflow snapshots every direct referrer before authentication,
+checks the snapshot again immediately before attachment, and requires the final
+descriptor set to equal the original set plus only the new verified bundle.
+Those checks detect unexpected or lost descriptors after the operation, but
+they cannot prevent or automatically roll back a racing external writer.
+Every executed reconciliation job attempts to record the pre-index,
+attached-referrer, and post-index digests in the step summary and retain a
+non-secret recovery-evidence artifact for seven days. Confirm that
+`evidence.json` is present and that the evidence-collection step succeeded
+before relying on it; `collection-status.txt` must say `complete`. The artifact
+contains only public canonical descriptor
+snapshots and the validation outcomes; it never contains the signed bundle or
+registry credentials.
+
+If post-attachment validation fails, stop all package writers and download the
+run's recovery-evidence artifact before changing GHCR. Resolve the current
+fallback tag with `oras manifest fetch --descriptor
+"$IMAGE_NAME:$REFERRERS_TAG"` and require its digest to equal the recorded
+`postIndexDigest`. If `preIndexDigest` is a SHA-256 digest, restore that exact
+index with `oras tag "$IMAGE_NAME@$PRE_INDEX_DIGEST" "$REFERRERS_TAG"`. If the
+pre-state was `absent`, do not delete anything automatically: first prove from
+the retained snapshots that the current index contains no unaccounted
+descriptor, then obtain separate destructive-action approval before deleting
+the recorded post-index manifest. An attached wrapper may remain untagged and
+must be assessed separately by digest. After recovery, rediscover all direct
+referrers and reverify both immutable release discovery tags.
 
 The recovery job targets the protected `attestation-recovery` environment. That
 environment must require at least one reviewer, prevent self-review, and disable
