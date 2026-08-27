@@ -35,6 +35,10 @@ body {
   font-family: Inter, Segoe UI, system-ui, -apple-system, sans-serif;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 button,
 input,
 select {

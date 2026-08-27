@@ -2,6 +2,13 @@
 
 All notable changes to Create Schematic Viewer are recorded here.
 
+## 1.0.1 - 2026-08-27
+
+### Fixed
+
+- Hidden administrator asset controls no longer appear over the styled loader
+  for read-only viewers embedded in LANtern.
+
 ## 1.0.0 - 2026-08-27
 
 ### Added

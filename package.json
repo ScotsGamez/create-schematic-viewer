@@ -1,6 +1,6 @@
 {
   "name": "create-schematic-viewer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Browser-based Create, Sponge, and vanilla Minecraft schematic inspector and 3D viewer.",
   "private": true,
   "license": "MIT",
