@@ -22,9 +22,7 @@ Then open:
 http://localhost:4173
 ```
 
-The server is intentionally small. It serves the GUI, parses uploaded schematics, and indexes uploaded mod/resource assets. It does not call external asset APIs.
-
-You can still open `public/index.html` directly as a fallback, but `npm start` is the intended path.
+The server is intentionally small. It serves the GUI, parses uploaded schematics, and indexes uploaded mod/resource assets. It does not call external asset APIs. Run the app through `npm start`; direct `file://` use is not supported because parsing is server-backed.
 
 The viewer currently uses Three.js from a CDN, so the browser needs internet access the first time it loads the page.
 
@@ -35,7 +33,7 @@ The viewer currently uses Three.js from a CDN, so the browser needs internet acc
 - Converter output can be kept as one `.nbt` or split into Y-layer part zips by a remembered KB target.
 - Server-side asset indexing for `assets/<namespace>/textures`, `models`, and `blockstates`.
 - Local asset texture/model resolution is used; no external website API is required.
-- Local NBT parsing with gzip/deflate support in modern browsers.
+- Server-side NBT parsing with gzip/deflate support.
 - Create/structure-style palette and block list normalization.
 - Sponge `.schem` v2 parsing with palette/varint `BlockData` support.
 - 3D schematic preview with orbit, pan, zoom, layer slicing, grid, and hologram transparency.
