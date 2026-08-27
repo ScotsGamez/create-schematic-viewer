@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "create-schematic-converter"
+version = "0.1.0"
+description = "Offline Litematica and Sponge schematic converter for vanilla Minecraft structure NBT files."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+  "nbtlib>=2.0.4,<3",
+]
+
+[project.scripts]
+litematic-to-nbt = "litematic_converter.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["litematic_converter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

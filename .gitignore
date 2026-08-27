@@ -4,6 +4,10 @@ node_modules/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+coverage/
+dist/
+.DS_Store
 
 *.log
 *.out.log

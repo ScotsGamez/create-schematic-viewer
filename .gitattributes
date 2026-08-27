@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.nbt binary
+*.schem binary
+*.schematic binary
+*.litematic binary
+*.jar binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary

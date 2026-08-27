@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible problem in Create Schematic Viewer.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove secrets, personal information, player data, and private server details before submitting.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I can share the included files, screenshots, and logs publicly.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that triggers the problem.
+      placeholder: |
+        1. Start the viewer with ...
+        2. Open ...
+        3. Select ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Revision or version
+      description: Commit SHA, branch, or release tag.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, browser, Node.js version, and Python version.
+    validations:
+      required: true
+  - type: dropdown
+    id: input-format
+    attributes:
+      label: Input format
+      options:
+        - Vanilla structure NBT (.nbt)
+        - Litematica (.litematic)
+        - Sponge schematic (.schem)
+        - Mod JAR or resource pack
+        - No uploaded file
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or additional context
+      description: Paste only information that is safe to publish. Do not report vulnerabilities here.
+      render: shell
