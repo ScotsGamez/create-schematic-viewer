@@ -29,10 +29,13 @@ before public disclosure.
 
 ## Deployment cautions
 
-The standalone server currently has no authentication or authorization. It
-accepts schematic, mod JAR, and resource-pack uploads and invokes a local Python
-converter. Treat uploaded files as untrusted, run the application with minimal
-host privileges, and do not expose it directly to the public internet.
+The standalone server has no end-user authentication. Persistent library
+changes are disabled by default and can be guarded by the trusted-proxy mode,
+but parsing and conversion endpoints still accept user-controlled files. Treat
+uploads as untrusted, run the application with minimal host privileges, and do
+not expose it directly to the public internet. See the
+[LANtern embed contract](docs/lantern-embed-contract.md) for the private-sidecar
+authorization boundary.
 
 Never commit or attach real player data, private server files, credentials,
 access tokens, or proprietary game/mod assets when reporting an issue.

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { assetSummary, getTexture, loadAssetPack, resolveBlockModel, resolveBlockTextures } from "./src/asset-pack.js";
 import { createLibraryApi } from "./src/server/library-api.js";
 import { parseUploadedSchematic, validateSchematicZip } from "./src/server/schematic-upload.js";
+import { createWriteAuthorizer } from "./src/server/write-authorization.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
@@ -39,6 +40,15 @@ const vendorFiles = new Map([
 
 const readinessFiles = [
   join(publicDir, "index.html"),
+  join(publicDir, "app.js"),
+  join(publicDir, "style.css"),
+  join(publicDir, "styles.css"),
+  join(publicDir, "js", "api-client.js"),
+  join(publicDir, "js", "block-shapes.js"),
+  join(publicDir, "js", "library-client.js"),
+  join(publicDir, "js", "orientation.js"),
+  join(publicDir, "js", "replacements.js"),
+  join(publicDir, "js", "schematic-data.js"),
   ...vendorFiles.values()
 ];
 
@@ -60,6 +70,27 @@ function sendJson(response, status, body) {
     "content-length": Buffer.byteLength(payload)
   });
   response.end(payload);
+}
+
+function applySecurityHeaders(response) {
+  response.setHeader("content-security-policy", [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' blob: data:",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'self'",
+    "form-action 'self'",
+    "worker-src 'none'"
+  ].join("; "));
+  response.setHeader("cross-origin-resource-policy", "same-origin");
+  response.setHeader("permissions-policy", "camera=(), geolocation=(), microphone=()");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-frame-options", "SAMEORIGIN");
 }
 
 export function formatLogLine(level, event, fields = {}) {
@@ -90,15 +121,6 @@ async function isReady(storageReadiness) {
   } catch {
     return false;
   }
-}
-
-function printLog(kind, text) {
-  const label = String(kind || "app").replace(/[^\w.-]+/g, "-").slice(0, 48) || "app";
-  const body = String(text || "").slice(0, 40000);
-  writeLog("info", "admin_log_print", {
-    kind: label,
-    content: body || "(empty)"
-  });
 }
 
 function route(request) {
@@ -374,14 +396,28 @@ function spawnConverter(command, args, cwd) {
   });
 }
 
-/** @param {{dataDir?: string, libraryWriteEnabled?: boolean}} [options] */
+/**
+ * @param {{
+ *   dataDir?: string,
+ *   libraryWriteEnabled?: boolean,
+ *   libraryWriteMode?: string,
+ *   libraryAdminTokenFile?: string
+ * }} [options]
+ */
 export function createAppServer({
   dataDir = process.env.DATA_DIR || defaultDataDir,
-  libraryWriteEnabled = process.env.LIBRARY_WRITE_ENABLED === "true"
+  libraryWriteEnabled = process.env.LIBRARY_WRITE_ENABLED === "true",
+  libraryWriteMode = process.env.LIBRARY_WRITE_MODE,
+  libraryAdminTokenFile = process.env.LIBRARY_ADMIN_TOKEN_FILE
 } = {}) {
+  const writeAuthorization = createWriteAuthorizer({
+    mode: libraryWriteMode,
+    tokenFile: libraryAdminTokenFile,
+    legacyWriteEnabled: libraryWriteEnabled
+  });
   const libraryApi = createLibraryApi({
     dataDir,
-    writeEnabled: libraryWriteEnabled,
+    canWrite: writeAuthorization.canWrite,
     maxUploadBytes: maxAssetPackBytes,
     parseSchematic: parseUploadedSchematic,
     loadAssetPack
@@ -391,6 +427,7 @@ export function createAppServer({
   }));
 
   return http.createServer(async (request, response) => {
+    applySecurityHeaders(response);
     try {
       const url = route(request);
       const localTextureMatch = url.pathname.match(/^\/api\/assets\/textures\/(.+)$/);
@@ -406,6 +443,20 @@ export function createAppServer({
       if (request.method === "GET" && url.pathname === "/readyz") {
         const ready = await isReady(libraryApi.checkReadiness);
         sendJson(response, ready ? 200 : 503, { status: ready ? "ready" : "unavailable" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/v1/capabilities") {
+        response.setHeader("cache-control", "no-store");
+        sendJson(response, 200, {
+          application: "create-schematic-viewer",
+          contractVersion: 1,
+          capabilities: {
+            libraryRead: true,
+            libraryWrite: writeAuthorization.canWrite(request),
+            conversion: true
+          }
+        });
         return;
       }
 
@@ -438,14 +489,6 @@ export function createAppServer({
 
       if (request.method === "POST" && url.pathname === "/api/schematic/replacements") {
         await applySchematicReplacements(request, response);
-        return;
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/logs/print") {
-        const body = await readLargeRequestBody(request, 1024 * 1024);
-        const payload = JSON.parse(body.toString("utf8"));
-        printLog(payload.kind, payload.text);
-        sendJson(response, 200, { ok: true });
         return;
       }
 

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 
 import { createAppServer, formatLogLine } from "../../server.js";
+import { close, listen } from "../../test-support/http-server.js";
 
 let server;
 let baseUrl;
@@ -13,16 +14,13 @@ let dataDir;
 before(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), "schematic-viewer-http-"));
   server = createAppServer({ dataDir, libraryWriteEnabled: true });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
+  await listen(server);
   const address = server.address();
   baseUrl = `http://127.0.0.1:${address.port}`;
 });
 
 after(async () => {
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await close(server);
   await rm(dataDir, { recursive: true, force: true });
 });
 
@@ -36,6 +34,27 @@ test("serves the application shell", async () => {
   assert.match(html, /\.\/vendor\/three\/three\.min\.js/);
   assert.match(html, /\.\/vendor\/three\/OrbitControls\.js/);
   assert.doesNotMatch(html, /https?:\/\//);
+  assert.match(response.headers.get("content-security-policy"), /frame-ancestors 'self'/);
+  assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.equal(response.headers.get("x-frame-options"), "SAMEORIGIN");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+});
+
+test("publishes a request-scoped integration capability contract", async () => {
+  const response = await fetch(`${baseUrl}/api/v1/capabilities`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    application: "create-schematic-viewer",
+    contractVersion: 1,
+    capabilities: {
+      libraryRead: true,
+      libraryWrite: true,
+      conversion: true
+    }
+  });
 });
 
 test("reports liveness and readiness", async () => {
@@ -92,6 +111,16 @@ test("reports asset-library state as JSON", async () => {
   assert.equal(response.status, 200);
   assert.equal(payload.textures, 0);
   assert.deepEqual(payload.packs, []);
+});
+
+test("does not expose a browser-to-server operational log writer", async () => {
+  const response = await fetch(`${baseUrl}/api/logs/print`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ kind: "untrusted", text: "must not reach server logs" })
+  });
+
+  assert.equal(response.status, 405);
 });
 
 test("returns a structured error for malformed schematic bytes", async () => {
@@ -198,13 +227,10 @@ test("keeps shared-library mutations disabled by default", async (context) => {
   const readOnlyDataDir = await mkdtemp(path.join(os.tmpdir(), "schematic-viewer-read-only-"));
   const readOnlyServer = createAppServer({ dataDir: readOnlyDataDir });
   context.after(async () => {
-    await new Promise((resolve, reject) => readOnlyServer.close((error) => error ? reject(error) : resolve()));
+    await close(readOnlyServer);
     await rm(readOnlyDataDir, { recursive: true, force: true });
   });
-  await new Promise((resolve, reject) => {
-    readOnlyServer.once("error", reject);
-    readOnlyServer.listen(0, "127.0.0.1", resolve);
-  });
+  await listen(readOnlyServer);
   const address = readOnlyServer.address();
   const originalError = console.error;
   console.error = () => {};
@@ -215,7 +241,121 @@ test("keeps shared-library mutations disabled by default", async (context) => {
       body: Uint8Array.of(10, 0, 0, 0)
     });
     assert.equal(response.status, 403);
-    assert.match((await response.json()).error, /changes are disabled/);
+    assert.match((await response.json()).error, /not authorized/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("requires a trusted proxy credential for every persistent mutation", async (context) => {
+  const trustedDataDir = await mkdtemp(path.join(os.tmpdir(), "schematic-viewer-trusted-"));
+  const tokenFile = path.join(trustedDataDir, "admin-token");
+  const token = "trusted-proxy-test-token-with-at-least-32-bytes";
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const trustedServer = createAppServer({
+    dataDir: trustedDataDir,
+    libraryWriteMode: "trusted-proxy",
+    libraryAdminTokenFile: tokenFile
+  });
+  context.after(async () => {
+    await close(trustedServer);
+    await rm(trustedDataDir, { recursive: true, force: true });
+  });
+  await listen(trustedServer);
+  const trustedAddress = trustedServer.address();
+  const trustedBaseUrl = `http://127.0.0.1:${trustedAddress.port}`;
+  const adminHeaders = {
+    "x-lantern-schematic-admin": token,
+    "x-file-name": "trusted.nbt"
+  };
+  const originalError = console.error;
+  const errorLines = [];
+  console.error = (line) => errorLines.push(line);
+  try {
+    const [anonymousCapabilities, adminCapabilities] = await Promise.all([
+      fetch(`${trustedBaseUrl}/api/v1/capabilities`),
+      fetch(`${trustedBaseUrl}/api/v1/capabilities`, { headers: adminHeaders })
+    ]);
+    assert.equal((await anonymousCapabilities.json()).capabilities.libraryWrite, false);
+    assert.equal((await adminCapabilities.json()).capabilities.libraryWrite, true);
+
+    const anonymousCreate = await fetch(`${trustedBaseUrl}/api/v1/library/schematics`, {
+      method: "POST",
+      headers: { "x-file-name": "blocked.nbt" },
+      body: Uint8Array.of(10, 0, 0, 0)
+    });
+    assert.equal(anonymousCreate.status, 403);
+
+    const wrongCreate = await fetch(`${trustedBaseUrl}/api/v1/library/schematics`, {
+      method: "POST",
+      headers: {
+        "x-file-name": "blocked.nbt",
+        "x-lantern-schematic-admin": "wrong"
+      },
+      body: Uint8Array.of(10, 0, 0, 0)
+    });
+    assert.equal(wrongCreate.status, 403);
+
+    const createResponse = await fetch(`${trustedBaseUrl}/api/v1/library/schematics`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: Uint8Array.of(10, 0, 0, 0)
+    });
+    assert.equal(createResponse.status, 201);
+    const created = await createResponse.json();
+
+    const blockedRoutes = [
+      ["POST", "/api/v1/library/assets"],
+      ["POST", "/api/assets/upload"],
+      ["POST", `/api/v1/library/schematics/${created.id}/versions`],
+      ["POST", `/api/v1/library/schematics/${created.id}/restore`],
+      ["DELETE", `/api/v1/library/schematics/${created.id}`]
+    ];
+    for (const [method, route] of blockedRoutes) {
+      const response = await fetch(`${trustedBaseUrl}${route}`, {
+        method,
+        headers: { "x-file-name": "blocked.nbt" },
+        body: method === "DELETE" ? undefined : Uint8Array.of(10, 0, 0, 0)
+      });
+      assert.equal(response.status, 403, `${method} ${route}`);
+    }
+
+    const listResponse = await fetch(`${trustedBaseUrl}/api/v1/library/schematics`, {
+      headers: adminHeaders
+    });
+    assert.equal(listResponse.headers.get("cache-control"), "no-store");
+    assert.equal((await listResponse.json()).capabilities.canWrite, true);
+
+    const emptyAssetPack = Buffer.alloc(22);
+    emptyAssetPack.writeUInt32LE(0x06054b50);
+    for (const route of ["/api/v1/library/assets", "/api/assets/upload"]) {
+      const response = await fetch(`${trustedBaseUrl}${route}`, {
+        method: "POST",
+        headers: { ...adminHeaders, "x-file-name": "empty-pack.zip" },
+        body: emptyAssetPack
+      });
+      assert.equal(response.status, 200, `trusted request reached ${route}`);
+    }
+
+    const versionResponse = await fetch(`${trustedBaseUrl}/api/v1/library/schematics/${created.id}/versions`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: Uint8Array.of(10, 0, 0, 0)
+    });
+    assert.equal(versionResponse.status, 201);
+
+    const trashResponse = await fetch(`${trustedBaseUrl}/api/v1/library/schematics/${created.id}`, {
+      method: "DELETE",
+      headers: adminHeaders
+    });
+    assert.equal(trashResponse.status, 200);
+
+    const restoreResponse = await fetch(`${trustedBaseUrl}/api/v1/library/schematics/${created.id}/restore`, {
+      method: "POST",
+      headers: adminHeaders
+    });
+    assert.equal(restoreResponse.status, 200);
+    assert.equal(errorLines.join("\n").includes(token), false);
   } finally {
     console.error = originalError;
   }

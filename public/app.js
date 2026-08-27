@@ -346,7 +346,7 @@ function downloadItemList() {
   elements.itemExportStatus.textContent = `Exported ${rows.length.toLocaleString()} item rows as ${format.toUpperCase()}.`;
 }
 
-async function printItemListToConsole() {
+function printItemListToConsole() {
   const rows = itemListRows(state.schematic, state.replacements);
   if (!rows.length) {
     elements.itemExportStatus.textContent = "No blocks are available to print.";
@@ -354,8 +354,8 @@ async function printItemListToConsole() {
   }
 
   const text = itemListText(rows, state.currentFileName);
-  await api.printLog("item-list", text);
-  elements.itemExportStatus.textContent = "Item list printed to the CMD console.";
+  console.info("[create-schematic-viewer:item-list]\n%s", text);
+  elements.itemExportStatus.textContent = "Item list printed to the browser console.";
 }
 
 function updatePaletteList() {
@@ -374,7 +374,7 @@ function updatePaletteList() {
       return `
         <div class="palette-row">
           ${elements.textureToggle.checked
-            ? `<img class="swatch" src="${iconUrl}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'), { className: 'swatch' }));">`
+            ? `<img class="swatch" src="${iconUrl}" alt="" loading="lazy">`
             : `<span class="swatch" style="background:${color}"></span>`}
           <span class="palette-name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
           <span class="count">${entry.count.toLocaleString()}</span>
@@ -382,6 +382,14 @@ function updatePaletteList() {
       `;
     })
     .join("");
+
+  for (const image of elements.paletteList.querySelectorAll("img.swatch")) {
+    image.addEventListener("error", () => {
+      const fallback = document.createElement("span");
+      fallback.className = "swatch";
+      image.replaceWith(fallback);
+    }, { once: true });
+  }
 }
 
 function updateWoodFamilyControls() {
@@ -522,14 +530,14 @@ function setOperationLog(kind, message) {
   state.logs[kind] = message || "";
 }
 
-async function showOperationLog(kind) {
+function showOperationLog(kind) {
   const text = state.logs[kind] || "";
   const target = kind === "converter" ? elements.converterStatus : elements.replacementStatus;
   if (!text) {
     target.textContent = "No log is available yet.";
   }
 
-  await api.printLog(kind, text || "No log is available yet.");
+  console.info(`[create-schematic-viewer:${kind}]\n%s`, text || "No log is available yet.");
 }
 
 async function renderSchematic() {
@@ -1258,8 +1266,8 @@ elements.convertLitematic.addEventListener("click", async () => {
 
 elements.showConverterLog.addEventListener("click", async () => {
   try {
-    await showOperationLog("converter");
-    elements.converterStatus.textContent = "Converter log printed to the CMD console.";
+    showOperationLog("converter");
+    elements.converterStatus.textContent = "Converter log printed to the browser console.";
   } catch (error) {
     elements.converterStatus.textContent = error.message;
   }
@@ -1384,7 +1392,7 @@ elements.replaceBlock.addEventListener("click", () => {
 elements.exportItemList.addEventListener("click", downloadItemList);
 elements.printItemList.addEventListener("click", async () => {
   try {
-    await printItemListToConsole();
+    printItemListToConsole();
   } catch (error) {
     elements.itemExportStatus.textContent = error.message;
   }
@@ -1395,8 +1403,8 @@ elements.woodTarget.addEventListener("change", renderWoodMatchList);
 elements.previewWoodSwap.addEventListener("click", previewWoodSwap);
 elements.showReplacementLog.addEventListener("click", async () => {
   try {
-    await showOperationLog("replacements");
-    elements.replacementStatus.textContent = "Replacement log printed to the CMD console.";
+    showOperationLog("replacements");
+    elements.replacementStatus.textContent = "Replacement log printed to the browser console.";
   } catch (error) {
     elements.replacementStatus.textContent = error.message;
   }
